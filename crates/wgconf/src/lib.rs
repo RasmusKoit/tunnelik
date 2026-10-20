@@ -61,6 +61,28 @@ impl FromStr for IpNet {
     }
 }
 
+impl IpNet {
+    /// Whether `addr` falls inside this network. An IPv4 network never contains an IPv6
+    /// address, and the other way round.
+    pub fn contains(&self, addr: IpAddr) -> bool {
+        match (self.addr, addr) {
+            (IpAddr::V4(net), IpAddr::V4(a)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u32::from(net) & mask == u32::from(a) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(a)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u128::from(net) & mask == u128::from(a) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Display for IpNet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.addr, self.prefix)
@@ -193,6 +215,8 @@ enum Section {
 }
 
 pub fn parse(text: &str) -> Result<Config, ParseError> {
+    // Notepad and PowerShell like to write a byte order mark, which isn't whitespace to trim().
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut section = Section::None;
     let mut interface: Option<InterfaceBuilder> = None;
     let mut peers: Vec<PeerBuilder> = Vec::new();
@@ -270,6 +294,27 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                                 Err(_) => iface.dns_search.push(item.to_string()),
                             }
                         }
+                    }
+                    // wg-quick settings for Linux routing tables and firewall marks; on Windows
+                    // there's nothing to apply them to.
+                    "fwmark" | "saveconfig" => {}
+                    "table" => {
+                        if value.eq_ignore_ascii_case("off") {
+                            return Err(ParseError::at(
+                                line,
+                                "`Table = off` (adding no routes) is not supported",
+                            ));
+                        }
+                    }
+                    // Scripts often set up routes or firewall rules the tunnel relies on, so
+                    // silently skipping them would be worse than refusing.
+                    "preup" | "postup" | "predown" | "postdown" => {
+                        return Err(ParseError::at(
+                            line,
+                            format!(
+                                "`{key}` scripts are not supported; remove the line to use this config"
+                            ),
+                        ));
                     }
                     _ => {
                         return Err(ParseError::at(
@@ -513,6 +558,47 @@ Endpoint = 203.0.113.10:13232
         assert_eq!(IpNet::from_str("::/0").map(|n| n.prefix), Ok(0));
         assert!(IpNet::from_str("10.0.0.0/33").is_err());
         assert!(IpNet::from_str("10.0.0/8").is_err());
+    }
+
+    #[test]
+    fn strips_byte_order_mark() {
+        assert!(parse(&format!("\u{feff}{}", sample())).is_ok());
+    }
+
+    #[test]
+    fn wg_quick_extras() {
+        let with = |extra: &str| sample().replace("ListenPort", &format!("{extra}\nListenPort"));
+        assert!(parse(&with("Table = auto")).is_ok());
+        assert!(parse(&with("Table = 1234")).is_ok());
+        assert!(parse(&with("FwMark = 0x1234")).is_ok());
+        assert!(parse(&with("SaveConfig = true")).is_ok());
+
+        let e = err(&with("Table = off"));
+        assert!(e.message.contains("Table = off"), "{e}");
+        let e = err(&with("PostUp = iptables -A FORWARD -i wg0 -j ACCEPT"));
+        assert_eq!(e.line, Some(2));
+        assert!(
+            e.message.contains("`PostUp` scripts are not supported"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn ip_net_contains() {
+        let net = |s: &str| IpNet::from_str(s).unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(net("10.0.0.0/8").contains(ip("10.255.1.2")));
+        assert!(!net("10.0.0.0/8").contains(ip("11.0.0.1")));
+        assert!(net("192.168.11.0/24").contains(ip("192.168.11.254")));
+        assert!(!net("192.168.11.0/24").contains(ip("192.168.12.1")));
+        assert!(net("0.0.0.0/0").contains(ip("8.8.8.8")));
+        assert!(net("10.9.8.7/32").contains(ip("10.9.8.7")));
+        assert!(!net("10.9.8.7/32").contains(ip("10.9.8.6")));
+        assert!(net("::/0").contains(ip("2001:db8::1")));
+        assert!(net("2001:db8::/32").contains(ip("2001:db8:ffff::1")));
+        // Address families never mix.
+        assert!(!net("0.0.0.0/0").contains(ip("::1")));
+        assert!(!net("::/0").contains(ip("10.0.0.1")));
     }
 
     #[test]

@@ -127,19 +127,33 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
         s.ipv4_routes.iter().any(|r| r.1 == 0) || s.ipv6_routes.iter().any(|r| r.1 == 0);
 
     let family = package_family()?;
-    store::save(&local_state()?, name, config_text)?;
 
-    // Values travel as environment variables, so nothing in them is parsed as PowerShell.
-    powershell(
+    // The VPN profile comes first: if the name already belongs to another VPN, nothing gets
+    // saved. Values travel as environment variables, so nothing in them is parsed as PowerShell.
+    let outcome = powershell(
         r#"
         $ErrorActionPreference = 'Stop'
         $split = $env:TUNNELIK_SPLIT -eq '1'
-        if (Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue) {
-            Set-VpnConnection -Name $env:TUNNELIK_NAME -ServerAddress $env:TUNNELIK_SERVER -SplitTunneling $split -Force -ErrorAction SilentlyContinue
+        $existing = Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+        if ($existing) {
+            if ($existing.PlugInApplicationID -ne $env:TUNNELIK_FAMILY) {
+                [Console]::Error.WriteLine("A VPN connection named '$($env:TUNNELIK_NAME)' already exists and isn't a Tunnelik tunnel. Pick another name.")
+                exit 2
+            }
+            if ($existing.ServerAddress -ne $env:TUNNELIK_SERVER -or $existing.SplitTunneling -ne $split) {
+                try {
+                    Set-VpnConnection -Name $env:TUNNELIK_NAME -ServerAddress $env:TUNNELIK_SERVER -SplitTunneling $split -Force
+                } catch {
+                    [Console]::Error.WriteLine("Couldn't update the VPN connection (disconnect it first?): $($_.Exception.Message)")
+                    exit 1
+                }
+            }
+            'updated'
         } else {
             Add-VpnConnection -Name $env:TUNNELIK_NAME -ServerAddress $env:TUNNELIK_SERVER `
                 -PlugInApplicationID $env:TUNNELIK_FAMILY -CustomConfiguration ([xml]$env:TUNNELIK_PROFILE) `
-                -SplitTunneling:$split -Force
+                -SplitTunneling:$split -Force | Out-Null
+            'created'
         }
         "#,
         &[
@@ -149,22 +163,42 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
             ("TUNNELIK_PROFILE", &profile::custom_configuration(name)),
             ("TUNNELIK_SPLIT", if full_tunnel { "0" } else { "1" }),
         ],
-    )
-    .map_err(|e| format!("creating the VPN connection: {e}"))?;
+    )?;
+
+    // Without its config a new profile would be a tunnel that can never connect, so take it
+    // back out if saving fails.
+    if let Err(e) = local_state().and_then(|dir| store::save(&dir, name, config_text)) {
+        if outcome == "created" {
+            let _ = remove_profile(name, &family);
+        }
+        return Err(e);
+    }
     Ok(())
 }
 
+/// Removes one of Tunnelik's own tunnels; other VPN connections are never touched.
 pub fn remove(name: &str) -> Result<(), String> {
-    profile::validate_name(name)?;
+    ensure_exists(name)?;
     if state_of(&connections(), name) != State::Disconnected {
         disconnect(name)?;
     }
-    powershell(
-        "Remove-VpnConnection -Name $env:TUNNELIK_NAME -Force -ErrorAction SilentlyContinue",
-        &[("TUNNELIK_NAME", name)],
-    )
-    .map_err(|e| format!("removing the VPN connection: {e}"))?;
+    remove_profile(name, &package_family()?)?;
     store::remove(&local_state()?, name)
+}
+
+/// Removes the VPN profile, but only if it is Tunnelik's.
+fn remove_profile(name: &str, family: &str) -> Result<(), String> {
+    powershell(
+        r#"
+        $existing = Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+        if ($existing -and $existing.PlugInApplicationID -eq $env:TUNNELIK_FAMILY) {
+            Remove-VpnConnection -Name $env:TUNNELIK_NAME -Force -ErrorAction Stop
+        }
+        "#,
+        &[("TUNNELIK_NAME", name), ("TUNNELIK_FAMILY", family)],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("removing the VPN connection: {e}"))
 }
 
 /// Connects a tunnel, first disconnecting any other Tunnelik tunnel: Windows runs only one

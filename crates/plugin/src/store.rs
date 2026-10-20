@@ -33,9 +33,16 @@ pub fn save(local_state: &Path, name: &str, config_text: &str) -> Result<(), Str
         .and_then(|buffer| read_buffer(&buffer))
         .context("encrypting the config")?;
 
+    // Write next to the target and swap it in, so a connect reading the tunnel at the same moment
+    // sees either the old config or the new one, never half of one.
+    let temp = path.with_extension("dpapi.tmp");
     fs::create_dir_all(local_state.join(DIR))
-        .and_then(|()| fs::write(&path, encrypted))
-        .map_err(|e| format!("saving {}: {e}", path.display()))
+        .and_then(|()| fs::write(&temp, encrypted))
+        .and_then(|()| fs::rename(&temp, &path))
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            format!("saving {}: {e}", path.display())
+        })
 }
 
 pub fn load(local_state: &Path, name: &str) -> Result<String, String> {
@@ -89,10 +96,13 @@ mod tests {
         let dir = temp_dir();
         let text = "[Interface]\nPrivateKey = secret\n";
 
+        save(&dir, "Home", "old").unwrap();
         save(&dir, "Home", text).unwrap();
         save(&dir, "Office", "x").unwrap();
         assert_eq!(load(&dir, "Home").unwrap(), text);
         assert_eq!(list(&dir), vec!["Home", "Office"]);
+        // Replacing a config leaves no temporary file behind.
+        assert_eq!(fs::read_dir(dir.join(DIR)).unwrap().count(), 2);
 
         // The file on disk must not contain the key in the clear.
         let raw = fs::read(dir.join(DIR).join("Home.conf.dpapi")).unwrap();

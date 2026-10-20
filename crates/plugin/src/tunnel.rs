@@ -1,6 +1,8 @@
 //! WireGuard session with a single peer, on top of BoringTun. Nothing here depends on Windows,
 //! so the packet flow can be tested anywhere.
 
+use std::net::IpAddr;
+
 use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
@@ -11,11 +13,28 @@ const BUF_LEN: usize = 65536 + 32;
 pub struct Tunnel {
     tunn: Tunn,
     buf: Vec<u8>,
+    /// The peer's AllowedIPs: decrypted packets must come from inside them.
+    allowed_ips: Vec<wgconf::IpNet>,
 }
 
 /// The public key belonging to a private key, which is what peers know this tunnel by.
 pub fn public_key(private: &wgconf::Key) -> wgconf::Key {
     wgconf::Key(PublicKey::from(&StaticSecret::from(private.0)).to_bytes())
+}
+
+/// WireGuard's cryptokey routing: a peer may only send from addresses in its AllowedIPs.
+/// BoringTun leaves this check to the caller. Without it a peer could inject packets that look
+/// like they came from, say, the local network's DNS server.
+fn accept(allowed_ips: &[wgconf::IpNet], packet: &[u8], src: IpAddr, out: &mut Decapsulated) {
+    // An empty packet is a keepalive.
+    if packet.is_empty() {
+        return;
+    }
+    if allowed_ips.iter().any(|net| net.contains(src)) {
+        out.to_tunnel.push(packet.to_vec());
+    } else {
+        out.rejected += 1;
+    }
 }
 
 /// Output of feeding one datagram from the peer into the tunnel.
@@ -26,6 +45,8 @@ pub struct Decapsulated {
     /// Datagrams to send back to the peer (handshake replies, queued packets).
     pub to_network: Vec<Vec<u8>>,
     pub error: Option<WireGuardError>,
+    /// Decrypted packets dropped because their source is outside the peer's AllowedIPs.
+    pub rejected: usize,
 }
 
 impl Tunnel {
@@ -41,6 +62,7 @@ impl Tunnel {
         Tunnel {
             tunn,
             buf: vec![0; BUF_LEN],
+            allowed_ips: peer.allowed_ips.clone(),
         }
     }
 
@@ -65,11 +87,12 @@ impl Tunnel {
                     out.to_network.push(datagram.to_vec());
                     input = &[];
                 }
-                TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-                    // An empty packet is a keepalive.
-                    if !packet.is_empty() {
-                        out.to_tunnel.push(packet.to_vec());
-                    }
+                TunnResult::WriteToTunnelV4(packet, src) => {
+                    accept(&self.allowed_ips, packet, src.into(), &mut out);
+                    break;
+                }
+                TunnResult::WriteToTunnelV6(packet, src) => {
+                    accept(&self.allowed_ips, packet, src.into(), &mut out);
                     break;
                 }
                 TunnResult::Done => break,
@@ -143,6 +166,10 @@ mod tests {
 
     /// Minimal IPv4/UDP packet; BoringTun only checks the header length fields.
     fn ipv4_packet(payload: &[u8]) -> Vec<u8> {
+        ipv4_packet_from([10, 1, 254, 3], payload)
+    }
+
+    fn ipv4_packet_from(src: [u8; 4], payload: &[u8]) -> Vec<u8> {
         let total = (20 + payload.len()) as u16;
         let mut p = vec![
             0x45,
@@ -158,9 +185,37 @@ mod tests {
             0,
             0,
         ];
-        p.extend_from_slice(&[10, 1, 254, 3, 10, 0, 0, 1]);
+        p.extend_from_slice(&src);
+        p.extend_from_slice(&[10, 0, 0, 1]);
         p.extend_from_slice(payload);
         p
+    }
+
+    #[test]
+    fn drops_packets_from_outside_allowed_ips() {
+        let (a, b) = ([1; 32], [2; 32]);
+        let mut split_peer = peer(b);
+        split_peer.allowed_ips = vec!["10.0.0.0/8".parse().unwrap()];
+        let mut client = Tunnel::new(&interface(a), &split_peer, 1);
+        let mut server = Tunnel::new(&interface(b), &peer(a), 2);
+
+        // Handshake, then a first data packet so the server may send too.
+        let reply = server.decapsulate(&client.handshake().unwrap());
+        client.decapsulate(&reply.to_network[0]);
+        let first = client.encapsulate(&ipv4_packet(b"hi")).unwrap().unwrap();
+        server.decapsulate(&first);
+
+        let inside = ipv4_packet_from([10, 9, 9, 9], b"ok");
+        let datagram = server.encapsulate(&inside).unwrap().unwrap();
+        let out = client.decapsulate(&datagram);
+        assert_eq!((out.to_tunnel, out.rejected), (vec![inside], 0));
+
+        // A packet claiming to come from the LAN's DNS server must not get through.
+        let spoofed = ipv4_packet_from([192, 168, 1, 1], b"evil");
+        let datagram = server.encapsulate(&spoofed).unwrap().unwrap();
+        let out = client.decapsulate(&datagram);
+        assert!(out.to_tunnel.is_empty());
+        assert_eq!(out.rejected, 1);
     }
 
     #[test]

@@ -10,7 +10,7 @@ const ui = {
   list: $("tunnels"), add: $("new"), empty: $("empty"),
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
   toggle: $("toggle"), edit: $("edit"), del: $("delete"),
-  editor: $("editor"), name: $("name"), config: $("config"), check: $("check"),
+  editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
   importFile: $("import"), cancel: $("cancel"), save: $("save"), error: $("error"),
 };
 
@@ -66,7 +66,16 @@ function stateOf(t) {
 
 const STATE_LABELS = { connected: "Connected", connecting: "Connecting…", disconnected: "Not connected" };
 
+let renderedList = "";
+
 function renderList() {
+  // The list is polled every few seconds; rebuilding it each time would drop keyboard focus,
+  // so only rebuild when something changed, and put focus back on the same toggle when it did.
+  const key = JSON.stringify([selected, tunnels.map((t) => [t.name, stateOf(t)])]);
+  if (key === renderedList) return;
+  renderedList = key;
+  const focused = document.activeElement?.dataset?.tunnel;
+
   ui.list.replaceChildren(...tunnels.map((t) => {
     const state = stateOf(t);
     const li = document.createElement("li");
@@ -81,6 +90,7 @@ function renderList() {
     toggle.setAttribute("role", "switch");
     toggle.setAttribute("aria-checked", state === "connected" ? "true" : "false");
     toggle.setAttribute("aria-label", `${t.name}: ${STATE_LABELS[state]}`);
+    toggle.dataset.tunnel = t.name;
     toggle.onclick = (e) => {
       e.stopPropagation();
       toggleTunnel(t);
@@ -90,6 +100,16 @@ function renderList() {
     li.onclick = () => open(t.name);
     return li;
   }));
+
+  if (focused) {
+    [...ui.list.querySelectorAll(".switch")].find((s) => s.dataset.tunnel === focused)?.focus();
+  }
+}
+
+/// While adding, a name that already exists (Windows ignores case) would replace that tunnel.
+function nameTaken() {
+  const name = ui.name.value.trim().toLowerCase();
+  return selected === null && name !== "" && tunnels.some((t) => t.name.toLowerCase() === name);
 }
 
 function dot(state) {
@@ -210,7 +230,10 @@ function open(name) {
 
 function setButtons() {
   const dirty = selected === null || ui.config.value !== savedConfig;
-  ui.save.disabled = busy || !dirty || !ui.name.value.trim() || !ui.config.value.trim();
+  const taken = nameTaken();
+  ui.nameNote.hidden = !taken;
+  ui.nameNote.textContent = taken ? `A tunnel named "${ui.name.value.trim()}" already exists. Pick another name, or edit that tunnel instead.` : "";
+  ui.save.disabled = busy || !dirty || taken || !ui.name.value.trim() || !ui.config.value.trim();
   ui.toggle.disabled = busy || stateOf(current()) === "connecting";
   ui.edit.disabled = busy;
   ui.del.disabled = busy;

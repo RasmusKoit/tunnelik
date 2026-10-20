@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -67,6 +67,8 @@ struct Stats {
     datagrams_in: AtomicU64,
     packets_in: AtomicU64,
     send_errors: AtomicU64,
+    /// Incoming packets not passed to Windows: from outside AllowedIPs, or too big to deliver.
+    dropped: AtomicU64,
 }
 
 impl Stats {
@@ -102,12 +104,13 @@ impl Session {
         let s = &self.stats;
         let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
         format!(
-            "status: handshake {handshake}; out {} packets / {} datagrams; in {} datagrams / {} packets; {} send errors",
+            "status: handshake {handshake}; out {} packets / {} datagrams; in {} datagrams / {} packets; {} send errors; {} dropped",
             get(&s.packets_out),
             get(&s.datagrams_out),
             get(&s.datagrams_in),
             get(&s.packets_in),
             get(&s.send_errors),
+            get(&s.dropped),
         )
     }
 }
@@ -118,11 +121,30 @@ impl Session {
 fn retire_host() {
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_millis(500));
-        if current_session().is_none() {
+        // When switching tunnels the next Connect may already run here, before it has a session.
+        if current_session().is_none() && CONNECTING.load(Ordering::SeqCst) == 0 {
             file_log("exiting the host process");
             std::process::exit(0);
         }
     });
+}
+
+/// Connects in progress in this process, so retire_host doesn't exit underneath one.
+static CONNECTING: AtomicUsize = AtomicUsize::new(0);
+
+struct ConnectInProgress;
+
+impl ConnectInProgress {
+    fn start() -> Self {
+        CONNECTING.fetch_add(1, Ordering::SeqCst);
+        ConnectInProgress
+    }
+}
+
+impl Drop for ConnectInProgress {
+    fn drop(&mut self) {
+        CONNECTING.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -177,6 +199,7 @@ struct Plugin;
 
 impl IVpnPlugIn_Impl for Plugin_Impl {
     fn Connect(&self, channel: Ref<VpnChannel>) -> Result<()> {
+        let _in_progress = ConnectInProgress::start();
         let channel = channel.ok()?;
         if let Err(message) = connect(channel) {
             log(channel, &message);
@@ -272,20 +295,30 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         let data = read_buffer(&datagram.ok()?.Buffer()?)?;
         let out = lock(&session.tunnel).decapsulate(&data);
         Stats::add(&session.stats.datagrams_in, 1);
-        Stats::add(&session.stats.packets_in, out.to_tunnel.len());
-        Stats::add(&session.stats.datagrams_out, out.to_network.len());
+        let stats = &session.stats;
+        Stats::add(&stats.dropped, out.rejected);
         if let Some(e) = out.error {
             log(channel, &format!("dropping incoming datagram: {e:?}"));
         }
+        // One packet that doesn't fit Windows' buffer (say, the peer uses a larger MTU) is
+        // dropped on its own, rather than failing the whole call and everything after it.
         for packet in &out.to_tunnel {
-            decapsulated
-                .ok()?
-                .Append(&new_packet(channel, VpnDataPathType::Receive, packet)?)?;
+            match new_packet(channel, VpnDataPathType::Receive, packet) {
+                Ok(buffer) => {
+                    decapsulated.ok()?.Append(&buffer)?;
+                    Stats::add(&stats.packets_in, 1);
+                }
+                Err(_) => Stats::add(&stats.dropped, 1),
+            }
         }
         for reply in &out.to_network {
-            control
-                .ok()?
-                .Append(&new_packet(channel, VpnDataPathType::Send, reply)?)?;
+            match new_packet(channel, VpnDataPathType::Send, reply) {
+                Ok(buffer) => {
+                    control.ok()?.Append(&buffer)?;
+                    Stats::add(&stats.datagrams_out, 1);
+                }
+                Err(_) => Stats::add(&stats.send_errors, 1),
+            }
         }
         Ok(())
     }
