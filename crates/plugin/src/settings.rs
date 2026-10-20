@@ -109,10 +109,10 @@ mod tests {
                 private_key: Key([1; 32]),
                 listen_port: Some(51820),
                 addresses: vec![
-                    "10.1.254.3/32".parse().unwrap(),
+                    "10.0.0.2/32".parse().unwrap(),
                     "fd00::3/128".parse().unwrap(),
                 ],
-                dns_servers: vec!["10.1.254.1".parse().unwrap()],
+                dns_servers: vec!["10.0.0.1".parse().unwrap()],
                 dns_search: vec!["corp.example".into()],
                 mtu: None,
             },
@@ -131,9 +131,9 @@ mod tests {
 
     #[test]
     fn maps_typical_config() {
-        let config = config("10.0.0.0/8, 192.168.11.0/24", Some("203.0.113.10:13232"));
+        let config = config("10.0.0.0/8, 192.168.50.0/24", Some("203.0.113.10:51821"));
         let s = from_config(&config).unwrap().settings;
-        assert_eq!(s.ipv4_addresses, vec![Ipv4Addr::new(10, 1, 254, 3)]);
+        assert_eq!(s.ipv4_addresses, vec![Ipv4Addr::new(10, 0, 0, 2)]);
         assert_eq!(
             s.ipv6_addresses,
             vec!["fd00::3".parse::<Ipv6Addr>().unwrap()]
@@ -142,11 +142,11 @@ mod tests {
             s.ipv4_routes,
             vec![
                 (Ipv4Addr::new(10, 0, 0, 0), 8),
-                (Ipv4Addr::new(192, 168, 11, 0), 24)
+                (Ipv4Addr::new(192, 168, 50, 0), 24)
             ]
         );
         assert!(s.ipv6_routes.is_empty());
-        assert_eq!(s.dns_servers, vec!["10.1.254.1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(s.dns_servers, vec!["10.0.0.1".parse::<IpAddr>().unwrap()]);
         assert_eq!(s.dns_search, vec!["corp.example".to_string()]);
         assert_eq!(s.mtu, 1420);
         assert_eq!(s.max_frame_size, 1484);
@@ -154,7 +154,7 @@ mod tests {
             s.endpoints,
             vec![Endpoint {
                 host: "203.0.113.10".into(),
-                port: 13232
+                port: 51821
             }]
         );
     }
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn ipv4_only_gets_placeholder_ipv6() {
         let mut config = config("10.0.0.0/8", Some("vpn.example:1"));
-        config.interface.addresses = vec!["10.1.254.3/32".parse().unwrap()];
+        config.interface.addresses = vec!["10.0.0.2/32".parse().unwrap()];
         let s = from_config(&config).unwrap().settings;
         assert_eq!(s.ipv6_addresses, vec![PLACEHOLDER_IPV6]);
         assert!(s.ipv6_routes.is_empty());
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn several_peers_combine_routes() {
-        let mut two = config("10.0.0.0/8, 192.168.11.0/24", Some("a.example:1"));
+        let mut two = config("10.0.0.0/8, 192.168.50.0/24", Some("a.example:1"));
         let mut second = two.peers[0].clone();
         second.allowed_ips = vec![
             "172.16.0.0/12".parse().unwrap(),
@@ -236,7 +236,7 @@ mod tests {
             s.ipv4_routes,
             vec![
                 (Ipv4Addr::new(10, 0, 0, 0), 8),
-                (Ipv4Addr::new(192, 168, 11, 0), 24),
+                (Ipv4Addr::new(192, 168, 50, 0), 24),
                 (Ipv4Addr::new(172, 16, 0, 0), 12),
             ]
         );

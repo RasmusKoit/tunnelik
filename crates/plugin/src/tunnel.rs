@@ -218,7 +218,7 @@ mod tests {
         Interface {
             private_key: Key(private),
             listen_port: None,
-            addresses: vec!["10.1.254.3/32".parse().unwrap()],
+            addresses: vec!["10.0.0.2/32".parse().unwrap()],
             dns_servers: vec![],
             dns_search: vec![],
             mtu: None,
@@ -254,7 +254,7 @@ mod tests {
 
     /// Minimal IPv4/UDP packet; BoringTun only checks the header length fields.
     fn ipv4_packet(payload: &[u8]) -> Vec<u8> {
-        ipv4([10, 1, 254, 3], [10, 0, 0, 1], payload)
+        ipv4([10, 0, 0, 2], [10, 0, 0, 1], payload)
     }
 
     fn ipv4_packet_from(src: [u8; 4], payload: &[u8]) -> Vec<u8> {
@@ -381,7 +381,7 @@ mod tests {
         let mut server_c = Tunnel::new(&interface(c), &[peer(a)], 3);
         assert_eq!(client.peer_count(), 2);
 
-        let to = |dst| ipv4([10, 1, 254, 3], dst, b"x");
+        let to = |dst| ipv4([10, 0, 0, 2], dst, b"x");
         assert_eq!(client.route(&to([10, 9, 9, 9])), Some(0));
         assert_eq!(
             client.route(&to([10, 1, 2, 3])),

@@ -478,13 +478,13 @@ mod tests {
             "[Interface]
 ListenPort = 51820
 PrivateKey = {}
-Address = 10.1.254.3/32
-DNS = 10.1.254.1
+Address = 10.0.0.2/32
+DNS = 10.0.0.1
 
 [Peer]
 PublicKey = {}
-AllowedIPs = 10.0.0.0/8, 192.168.11.0/24
-Endpoint = 203.0.113.10:13232
+AllowedIPs = 10.0.0.0/8, 192.168.50.0/24
+Endpoint = 203.0.113.10:51821
 ",
             key(1).to_base64(),
             key(2).to_base64(),
@@ -501,10 +501,10 @@ Endpoint = 203.0.113.10:13232
         let iface = &config.interface;
         assert_eq!(iface.private_key, key(1));
         assert_eq!(iface.listen_port, Some(51820));
-        assert_eq!(iface.addresses, vec!["10.1.254.3/32".parse().unwrap()]);
+        assert_eq!(iface.addresses, vec!["10.0.0.2/32".parse().unwrap()]);
         assert_eq!(
             iface.dns_servers,
-            vec![IpAddr::V4(Ipv4Addr::new(10, 1, 254, 1))]
+            vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]
         );
         assert!(iface.dns_search.is_empty());
 
@@ -515,14 +515,14 @@ Endpoint = 203.0.113.10:13232
             peer.allowed_ips,
             vec![
                 IpNet::from_str("10.0.0.0/8").unwrap(),
-                IpNet::from_str("192.168.11.0/24").unwrap()
+                IpNet::from_str("192.168.50.0/24").unwrap()
             ]
         );
         assert_eq!(
             peer.endpoint,
             Some(Endpoint {
                 host: "203.0.113.10".into(),
-                port: 13232
+                port: 51821
             })
         );
         assert_eq!(peer.persistent_keepalive, None);
@@ -539,14 +539,14 @@ Endpoint = 203.0.113.10:13232
     #[test]
     fn dns_search_domains() {
         let text = sample().replace(
-            "DNS = 10.1.254.1",
-            "DNS = 10.1.254.1, corp.example, 2001:db8::53",
+            "DNS = 10.0.0.1",
+            "DNS = 10.0.0.1, corp.example, 2001:db8::53",
         );
         let iface = parse(&text).unwrap().interface;
         assert_eq!(
             iface.dns_servers,
             vec![
-                IpAddr::V4(Ipv4Addr::new(10, 1, 254, 1)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x53)),
             ]
         );
@@ -589,7 +589,7 @@ Endpoint = 203.0.113.10:13232
         for text in [
             "[2001:db8::1]:51820",
             "vpn.example.com:443",
-            "203.0.113.10:13232",
+            "203.0.113.10:51821",
         ] {
             assert_eq!(text.parse::<Endpoint>().unwrap().to_string(), text);
         }
@@ -660,8 +660,8 @@ Endpoint = 203.0.113.10:13232
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         assert!(net("10.0.0.0/8").contains(ip("10.255.1.2")));
         assert!(!net("10.0.0.0/8").contains(ip("11.0.0.1")));
-        assert!(net("192.168.11.0/24").contains(ip("192.168.11.254")));
-        assert!(!net("192.168.11.0/24").contains(ip("192.168.12.1")));
+        assert!(net("192.168.50.0/24").contains(ip("192.168.50.254")));
+        assert!(!net("192.168.50.0/24").contains(ip("192.168.51.1")));
         assert!(net("0.0.0.0/0").contains(ip("8.8.8.8")));
         assert!(net("10.9.8.7/32").contains(ip("10.9.8.7")));
         assert!(!net("10.9.8.7/32").contains(ip("10.9.8.6")));
@@ -697,7 +697,7 @@ Endpoint = 203.0.113.10:13232
         let no_private = sample().replace(&format!("PrivateKey = {}\n", key(1).to_base64()), "");
         assert!(err(&no_private).message.contains("PrivateKey"));
 
-        let no_address = sample().replace("Address = 10.1.254.3/32\n", "");
+        let no_address = sample().replace("Address = 10.0.0.2/32\n", "");
         assert!(err(&no_address).message.contains("Address"));
 
         let no_peer = sample().split("[Peer]").next().unwrap().to_string();
