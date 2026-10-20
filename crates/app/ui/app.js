@@ -85,10 +85,12 @@ async function open(name) {
   await run(async () => {
     const text = await invoke("read_tunnel", { name });
     selected = name;
-    savedConfig = text;
     ui.name.value = name;
     ui.name.readOnly = true;
     ui.config.value = text;
+    // Compare against what the text box reports: it turns CRLF line endings into LF, which would
+    // otherwise look like an unsaved edit and keep Connect disabled.
+    savedConfig = ui.config.value;
     showEditor();
     validate();
     renderList();
