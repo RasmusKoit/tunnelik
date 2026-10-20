@@ -21,7 +21,7 @@ The official WireGuard app is not used.
 | Path            | What                                              | Status  |
 |-----------------|---------------------------------------------------|---------|
 | `crates/wgconf` | Parser for WireGuard `.conf` files                | Done    |
-| `crates/plugin` | VPN plugin and encrypted tunnel store             | Builds, not yet run in Windows |
+| `crates/plugin` | VPN plugin and encrypted tunnel store             | Works: connects, carries traffic, disconnects |
 | `crates/host`   | `wgw11_host.exe`, the process Windows runs the plugin in | Builds |
 | `crates/cli`    | `wgw11` command to add, remove and list tunnels   | Builds  |
 | `package`       | MSIX manifest and icons                           | Validates with MakeAppx |
@@ -43,8 +43,8 @@ Turn on **Settings → System → For developers → Developer Mode**.
 .\target\release\wgw11.exe add Home C:\path\to\home.conf
 ```
 
-Then connect **Home** from Settings → Network & internet → VPN. Plugin messages show up in
-Event Viewer under *Applications and Services Logs → Microsoft → Windows → VPN Plugin Platform*.
+Then connect **Home** from Settings → Network & internet → VPN, or with `rasdial Home`.
+The plugin logs to `%LOCALAPPDATA%\Packages\WireGuardW11_<id>\LocalState\plugin.log`.
 
 Limitations for now: one `[Peer]` per tunnel; editing a tunnel means running `add` again.
 

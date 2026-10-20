@@ -8,8 +8,8 @@
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows::ApplicationModel::Background::{
@@ -32,13 +32,14 @@ use windows_core::{
 };
 
 use crate::tunnel::Tunnel;
-use crate::winrt::{Context, E_FAIL, read_buffer, write_buffer};
+use crate::winrt::{Context, E_FAIL, host_names, read_buffer, write_buffer};
 use crate::{profile, settings, store};
 
 /// Class name the package manifest registers for the background task.
 pub const TASK_CLASS: &str = "WireGuardW11.VpnBackgroundTask";
 
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
+const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 
 const S_OK: HRESULT = HRESULT(0);
 const S_FALSE: HRESULT = HRESULT(1);
@@ -52,16 +53,76 @@ struct Session {
     channel: VpnChannel,
     /// Owned by Windows once associated; kept so it lives as long as the session.
     _socket: DatagramSocket,
+    /// Set once Start returned. Sending through the channel before that deadlocks.
+    started: AtomicBool,
     stop: AtomicBool,
+    stats: Stats,
+}
+
+/// Counters for the status lines in plugin.log.
+#[derive(Default)]
+struct Stats {
+    packets_out: AtomicU64,
+    datagrams_out: AtomicU64,
+    datagrams_in: AtomicU64,
+    packets_in: AtomicU64,
+    send_errors: AtomicU64,
+}
+
+impl Stats {
+    fn add(counter: &AtomicU64, n: usize) {
+        counter.fetch_add(n as u64, Ordering::Relaxed);
+    }
 }
 
 impl Session {
     /// Sends a datagram outside of Windows' packet callbacks, for handshakes and timers.
     fn send(&self, datagram: &[u8]) -> Result<()> {
-        let packet = new_packet(&self.channel, VpnDataPathType::Send, datagram)?;
-        self.channel.AppendVpnSendPacketBuffer(&packet)?;
-        self.channel.FlushVpnSendPacketBuffers()
+        if !self.started.load(Ordering::Relaxed) {
+            return Err(Error::new(E_FAIL, "the VPN channel has not started yet"));
+        }
+        let result =
+            new_packet(&self.channel, VpnDataPathType::Send, datagram).and_then(|packet| {
+                self.channel.AppendVpnSendPacketBuffer(&packet)?;
+                self.channel.FlushVpnSendPacketBuffers()
+            });
+        match &result {
+            Ok(()) => Stats::add(&self.stats.datagrams_out, 1),
+            Err(_) => Stats::add(&self.stats.send_errors, 1),
+        }
+        result
     }
+
+    fn status(&self) -> String {
+        let tunnel = lock(&self.tunnel);
+        let handshake = match tunnel.last_handshake() {
+            Some(age) => format!("{}s ago", age.as_secs()),
+            None => "none yet".into(),
+        };
+        let s = &self.stats;
+        let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        format!(
+            "status: handshake {handshake}; out {} packets / {} datagrams; in {} datagrams / {} packets; {} send errors",
+            get(&s.packets_out),
+            get(&s.datagrams_out),
+            get(&s.datagrams_in),
+            get(&s.packets_in),
+            get(&s.send_errors),
+        )
+    }
+}
+
+/// Exits the host once its connection is over. The Connect event of a finished connection never
+/// completes, and Windows kills its host 90 seconds after the disconnect, taking any newer
+/// connection in the same process with it. Exiting now gives the next connect a fresh host.
+fn retire_host() {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(500));
+        if current_session().is_none() {
+            file_log("exiting the host process");
+            std::process::exit(0);
+        }
+    });
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -90,13 +151,25 @@ struct BackgroundTask;
 
 impl IBackgroundTask_Impl for BackgroundTask_Impl {
     fn Run(&self, task: Ref<IBackgroundTaskInstance>) -> Result<()> {
-        let plugin: IVpnPlugIn = Plugin.into();
-        let result = VpnChannel::ProcessEventAsync(&plugin, &task.ok()?.TriggerDetails()?);
+        let task = task.ok()?;
+        let result = VpnChannel::ProcessEventAsync(plugin(), &task.TriggerDetails()?);
         if let Err(e) = &result {
             file_log(&format!("handling a VPN event failed: {}", e.message()));
         }
         result
     }
+}
+
+/// Windows must get the same plugin object for every event; with a fresh one per event, packets
+/// still flow but Disconnect never arrives.
+fn plugin() -> &'static IVpnPlugIn {
+    struct Shared(IVpnPlugIn);
+    // SAFETY: `Plugin` is stateless and, like every `#[implement]` object, agile, so its
+    // interface may be used from any thread.
+    unsafe impl Send for Shared {}
+    unsafe impl Sync for Shared {}
+    static PLUGIN: OnceLock<Shared> = OnceLock::new();
+    &PLUGIN.get_or_init(|| Shared(Plugin.into())).0
 }
 
 #[implement(IVpnPlugIn)]
@@ -105,17 +178,35 @@ struct Plugin;
 impl IVpnPlugIn_Impl for Plugin_Impl {
     fn Connect(&self, channel: Ref<VpnChannel>) -> Result<()> {
         let channel = channel.ok()?;
-        connect(channel).map_err(|message| {
+        if let Err(message) = connect(channel) {
             log(channel, &message);
-            let _ = channel.SetErrorMessage(&HSTRING::from(&message));
-            Error::new(E_FAIL, message)
-        })
+            // TerminateConnection shows the message in Settings; SetErrorMessage isn't supported.
+            let _ = channel.TerminateConnection(&HSTRING::from(&message));
+        }
+        Ok(())
     }
 
     fn Disconnect(&self, channel: Ref<VpnChannel>) -> Result<()> {
-        file_log("trace: Disconnect");
+        if let Some(session) = current_session() {
+            file_log(&session.status());
+        }
+        file_log("disconnecting");
         stop_session();
-        channel.ok()?.Stop()
+
+        // Stop only completes from inside this callback: once it returns, Windows' own teardown
+        // takes the channel lock and calls Stop itself, which deadlocks. Bound the wait anyway.
+        let channel = channel.ok()?.clone();
+        let (done, stopped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(channel.Stop());
+        });
+        match stopped.recv_timeout(STOP_TIMEOUT) {
+            Ok(Ok(())) => file_log("channel stopped"),
+            Ok(Err(e)) => file_log(&format!("stopping the channel failed: {}", e.message())),
+            Err(_) => file_log("stopping the channel timed out"),
+        }
+        retire_host();
+        Ok(())
     }
 
     fn GetKeepAlivePayload(
@@ -124,7 +215,6 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         packet: OutRef<VpnPacketBuffer>,
     ) -> Result<()> {
         // WireGuard sends its own keepalives from the timer thread.
-        trace_once(&TRACE_KEEPALIVE, "GetKeepAlivePayload");
         packet.write(None)
     }
 
@@ -134,7 +224,6 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         packets: Ref<VpnPacketBufferList>,
         encapsulated: Ref<VpnPacketBufferList>,
     ) -> Result<()> {
-        trace_once(&TRACE_ENCAP, "Encapsulate");
         let (channel, packets, encapsulated) = (channel.ok()?, packets.ok()?, encapsulated.ok()?);
         let Some(session) = current_session() else {
             // Not connected yet: drop the packets, but hand the buffers back to Windows.
@@ -144,18 +233,22 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
             return Ok(());
         };
         let mut tunnel = lock(&session.tunnel);
+        let stats = &session.stats;
 
         for _ in 0..packets.Size()? {
             let packet = packets.RemoveAtBegin()?;
             let buffer = packet.Buffer()?;
+            Stats::add(&stats.packets_out, 1);
             match tunnel.encapsulate(&read_buffer(&buffer)?) {
                 // Reuse the packet's own buffer when the encrypted datagram fits.
                 Ok(Some(datagram)) if datagram.len() <= buffer.Capacity()? as usize => {
                     write_buffer(&buffer, &datagram)?;
                     encapsulated.Append(&packet)?;
+                    Stats::add(&stats.datagrams_out, 1);
                 }
                 Ok(Some(datagram)) => {
                     encapsulated.Append(&new_packet(channel, VpnDataPathType::Send, &datagram)?)?;
+                    Stats::add(&stats.datagrams_out, 1);
                 }
                 Ok(None) => {}
                 Err(e) => log(channel, &format!("dropping outgoing packet: {e:?}")),
@@ -171,7 +264,6 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         decapsulated: Ref<VpnPacketBufferList>,
         control: Ref<VpnPacketBufferList>,
     ) -> Result<()> {
-        trace_once(&TRACE_DECAP, "Decapsulate");
         let channel = channel.ok()?;
         let Some(session) = current_session() else {
             return Ok(());
@@ -179,6 +271,9 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
 
         let data = read_buffer(&datagram.ok()?.Buffer()?)?;
         let out = lock(&session.tunnel).decapsulate(&data);
+        Stats::add(&session.stats.datagrams_in, 1);
+        Stats::add(&session.stats.packets_in, out.to_tunnel.len());
+        Stats::add(&session.stats.datagrams_out, out.to_network.len());
         if let Some(e) = out.error {
             log(channel, &format!("dropping incoming datagram: {e:?}"));
         }
@@ -233,19 +328,18 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let routes = routes(s).context("setting up routes")?;
     let dns = dns(s).context("setting up DNS")?;
 
-    // Start below only returns when the connection ends, so the session must exist before it.
+    // Windows may hand us packets as soon as the channel starts, so the session exists first.
     let session = Arc::new(Session {
         tunnel: Mutex::new(Tunnel::new(setup.interface, setup.peer, session_index())),
         channel: channel.clone(),
         _socket: socket.clone(),
+        started: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        stats: Stats::default(),
     });
     *lock(&SESSION) = Some(session.clone());
-    let timers = session.clone();
-    std::thread::spawn(move || run_timers(&timers));
 
-    log(channel, "connected");
-    let result = channel
+    let started = channel
         .StartWithMainTransport(
             ipv4.as_ref(),
             ipv6.as_ref(),
@@ -258,12 +352,26 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
             &socket,
         )
         .context("starting the VPN interface");
+    if let Err(e) = started {
+        stop_session();
+        return Err(e);
+    }
+    session.started.store(true, Ordering::Relaxed);
+    log(channel, "connected");
 
-    let disconnected = session.stop.load(Ordering::Relaxed);
-    stop_session();
-    log(channel, "connection ended");
-    // Once Windows asked us to disconnect, how Start ends doesn't matter.
-    if disconnected { Ok(()) } else { result }
+    // Handshake right away, so the tunnel is up before the first packet needs it.
+    let handshake = lock(&session.tunnel).handshake();
+    if let Some(datagram) = handshake
+        && let Err(e) = session.send(&datagram)
+    {
+        log(
+            channel,
+            &format!("first handshake not sent, will retry: {e}"),
+        );
+    }
+    let timers = session.clone();
+    std::thread::spawn(move || run_timers(&timers));
+    Ok(())
 }
 
 fn local_state() -> std::result::Result<PathBuf, String> {
@@ -278,21 +386,14 @@ fn run_timers(session: &Session) {
     // SAFETY: called once at the start of a thread we own.
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
 
-    // Start the handshake right away, so the tunnel is up before the first packet. If the
-    // channel isn't ready yet the send fails, and WireGuard's retry timer sends it again.
-    std::thread::sleep(TICK_INTERVAL);
-    let handshake = lock(&session.tunnel).handshake();
-    if let Some(datagram) = handshake
-        && let Err(e) = session.send(&datagram)
-    {
-        log(
-            &session.channel,
-            &format!("first handshake not sent, will retry: {e}"),
-        );
-    }
-
+    let mut ticks: u64 = 0;
     while !session.stop.load(Ordering::Relaxed) {
         std::thread::sleep(TICK_INTERVAL);
+        ticks += 1;
+        // Status after 1, 3 and 10 seconds, then every minute.
+        if matches!(ticks, 4 | 12 | 40) || ticks.is_multiple_of(240) {
+            file_log(&session.status());
+        }
         let datagram = lock(&session.tunnel).tick();
         if let Ok(Some(datagram)) = datagram {
             // A lost keepalive or handshake is retried on a later tick.
@@ -325,18 +426,19 @@ fn dns(s: &settings::ChannelSettings) -> Result<VpnDomainNameAssignment> {
     if s.dns_servers.is_empty() {
         return Ok(dns);
     }
-    let servers = s
-        .dns_servers
-        .iter()
-        .map(|a| host(&a.to_string()).map(Some))
-        .collect::<Result<Vec<_>>>()?;
     let names = dns.DomainNameList()?;
     // "." sends every lookup to the tunnel's DNS servers, like the official client does.
     for suffix in std::iter::once(".").chain(s.dns_search.iter().map(String::as_str)) {
+        // Windows needs a real, writable vector for the servers.
+        let servers = s
+            .dns_servers
+            .iter()
+            .map(|a| host(&a.to_string()))
+            .collect::<Result<Vec<_>>>()?;
         let info = VpnDomainNameInfo::CreateVpnDomainNameInfo(
             &HSTRING::from(suffix),
             VpnDomainNameType::Suffix,
-            &IIterable::<HostName>::from(servers.clone()),
+            &host_names(servers),
             None::<&IIterable<HostName>>,
         )?;
         names.Append(&info)?;
@@ -367,10 +469,13 @@ fn session_index() -> u32 {
     nanos & 0x00FF_FFFF
 }
 
+/// A packet buffer from Windows' pools, which only exist once the channel has started.
 fn new_packet(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Result<VpnPacketBuffer> {
-    let mut packet = None;
-    channel.RequestVpnPacketBuffer(kind, &mut packet)?;
-    let packet = packet.ok_or_else(|| Error::new(E_FAIL, "Windows has no free packet buffer"))?;
+    let packet = if kind == VpnDataPathType::Send {
+        channel.GetVpnSendPacketBuffer()?
+    } else {
+        channel.GetVpnReceivePacketBuffer()?
+    };
     write_buffer(&packet.Buffer()?, data)?;
     Ok(packet)
 }
@@ -378,20 +483,6 @@ fn new_packet(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Resul
 fn log(channel: &VpnChannel, message: &str) {
     let _ = channel.LogDiagnosticMessage(&HSTRING::from(message));
     file_log(message);
-}
-
-static TRACE_KEEPALIVE: AtomicBool = AtomicBool::new(false);
-static TRACE_ENCAP: AtomicBool = AtomicBool::new(false);
-static TRACE_DECAP: AtomicBool = AtomicBool::new(false);
-
-/// Logs the first call of a hot callback, to see which ones Windows makes.
-fn trace_once(flag: &AtomicBool, what: &str) {
-    if !flag.swap(true, Ordering::Relaxed) {
-        file_log(&format!(
-            "trace: first {what} on {:?}",
-            std::thread::current().id()
-        ));
-    }
 }
 
 /// Appends to `plugin.log` in the package's data folder. Never log key material here.

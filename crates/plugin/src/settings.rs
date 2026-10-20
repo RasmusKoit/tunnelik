@@ -8,6 +8,8 @@ use wgconf::{Config, Endpoint, Interface, IpNet, Peer};
 pub const DEFAULT_MTU: u16 = 1420;
 /// Encrypted packets are the inner packet plus 32 bytes; leave some slack.
 pub const FRAME_OVERHEAD: u32 = 64;
+/// Unique local address for tunnels without IPv6 (fd77:6731:3100::/48, picked at random).
+pub const PLACEHOLDER_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd77, 0x6731, 0x3100, 0, 0, 0, 0, 1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSettings {
@@ -55,6 +57,11 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
             IpAddr::V4(a) => settings.ipv4_addresses.push(a),
             IpAddr::V6(a) => settings.ipv6_addresses.push(a),
         }
+    }
+    // Windows won't start a VPN channel without an IPv6 address, so IPv4-only tunnels get a
+    // private one. Nothing is routed to it.
+    if settings.ipv6_addresses.is_empty() {
+        settings.ipv6_addresses.push(PLACEHOLDER_IPV6);
     }
     for net in &peer.allowed_ips {
         match network(net) {
@@ -182,6 +189,15 @@ mod tests {
         let s = from_config(&config).unwrap().settings;
         assert_eq!(s.ipv4_routes, vec![(Ipv4Addr::new(10, 9, 8, 7), 32)]);
         assert_eq!(s.ipv6_routes, vec![("2001:db8::7".parse().unwrap(), 128)]);
+    }
+
+    #[test]
+    fn ipv4_only_gets_placeholder_ipv6() {
+        let mut config = config("10.0.0.0/8", Some("vpn.example:1"));
+        config.interface.addresses = vec!["10.1.254.3/32".parse().unwrap()];
+        let s = from_config(&config).unwrap().settings;
+        assert_eq!(s.ipv6_addresses, vec![PLACEHOLDER_IPV6]);
+        assert!(s.ipv6_routes.is_empty());
     }
 
     #[test]

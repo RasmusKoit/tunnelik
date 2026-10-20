@@ -85,6 +85,11 @@ impl Tunnel {
         }
     }
 
+    /// Time since the last completed handshake, if there was one.
+    pub fn last_handshake(&self) -> Option<std::time::Duration> {
+        self.tunn.time_since_last_handshake()
+    }
+
     /// Drives rekeying and keepalives. Call a few times per second.
     pub fn tick(&mut self) -> Result<Option<Vec<u8>>, WireGuardError> {
         match self.tunn.update_timers(&mut self.buf) {
