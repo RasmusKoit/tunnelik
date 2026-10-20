@@ -15,6 +15,7 @@ const ui = {
 };
 
 let tunnels = [];
+const pending = new Set(); // tunnels we are connecting or disconnecting right now
 let selected = null;     // name of the tunnel shown or being edited; null while adding a new one
 let details = null;      // overview of the selected tunnel
 let savedConfig = "";    // config as loaded into the editor, to detect edits
@@ -57,24 +58,67 @@ function current() {
 
 // ---- Sidebar ----
 
+/// "disconnected", "connecting" or "connected", counting our own in-flight toggles as connecting.
+function stateOf(t) {
+  if (!t) return "disconnected";
+  return pending.has(t.name) ? "connecting" : t.state;
+}
+
+const STATE_LABELS = { connected: "Connected", connecting: "Connecting…", disconnected: "Not connected" };
+
 function renderList() {
   ui.list.replaceChildren(...tunnels.map((t) => {
+    const state = stateOf(t);
     const li = document.createElement("li");
     li.className = t.name === selected ? "selected" : "";
     const label = document.createElement("span");
     label.className = "label";
     label.textContent = t.name;
-    li.append(dot(t.connected), label);
+
+    const toggle = document.createElement("button");
+    toggle.className = `switch ${state}`;
+    toggle.title = `${STATE_LABELS[state]} — click to ${state === "disconnected" ? "connect" : "disconnect"}`;
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", state === "connected" ? "true" : "false");
+    toggle.setAttribute("aria-label", `${t.name}: ${STATE_LABELS[state]}`);
+    toggle.onclick = (e) => {
+      e.stopPropagation();
+      toggleTunnel(t);
+    };
+
+    li.append(label, toggle);
     li.onclick = () => open(t.name);
     return li;
   }));
 }
 
-function dot(on) {
+function dot(state) {
   const d = document.createElement("span");
-  d.className = "dot" + (on ? " on" : "");
-  d.title = on ? "Connected" : "Disconnected";
+  d.className = `dot ${state}`;
   return d;
+}
+
+/// Connects or disconnects a tunnel. Connecting one disconnects any other Tunnelik tunnel, since
+/// Windows only runs one connection per VPN plugin.
+async function toggleTunnel(t) {
+  if (pending.has(t.name)) return;
+  const action = stateOf(t) === "disconnected" ? "connect" : "disconnect";
+  pending.add(t.name);
+  showError("");
+  renderAll();
+  try {
+    await invoke(action, { name: t.name });
+  } catch (e) {
+    showError(String(e));
+  } finally {
+    pending.delete(t.name);
+    await refresh();
+  }
+}
+
+function renderAll() {
+  renderList();
+  if (!ui.details.hidden) renderInterface();
 }
 
 async function refresh() {
@@ -84,8 +128,7 @@ async function refresh() {
     showError(String(e));
     return;
   }
-  renderList();
-  if (!ui.details.hidden) renderInterface();
+  renderAll();
   setButtons();
 }
 
@@ -110,10 +153,11 @@ function fields(dl, rows) {
 
 function renderInterface() {
   if (!details) return;
-  const t = current();
+  const state = stateOf(current());
   const status = document.createElement("span");
   status.className = "status";
-  status.append(dot(t && t.connected), document.createTextNode(t && t.connected ? "Active" : "Inactive"));
+  status.append(dot(state), document.createTextNode(
+    { connected: "Active", connecting: "Working…", disconnected: "Inactive" }[state]));
 
   ui.dName.textContent = selected;
   fields(ui.dInterface, [
@@ -124,7 +168,8 @@ function renderInterface() {
     ["DNS servers", details.dns],
     ["MTU", details.mtu],
   ]);
-  ui.toggle.textContent = t && t.connected ? "Deactivate" : "Activate";
+  ui.toggle.textContent = state === "disconnected" ? "Activate" : "Deactivate";
+  ui.toggle.disabled = busy || state === "connecting";
 }
 
 function renderPeers() {
@@ -166,7 +211,7 @@ function open(name) {
 function setButtons() {
   const dirty = selected === null || ui.config.value !== savedConfig;
   ui.save.disabled = busy || !dirty || !ui.name.value.trim() || !ui.config.value.trim();
-  ui.toggle.disabled = busy;
+  ui.toggle.disabled = busy || stateOf(current()) === "connecting";
   ui.edit.disabled = busy;
   ui.del.disabled = busy;
 }
@@ -293,13 +338,10 @@ ui.del.onclick = () => {
   });
 };
 
-ui.toggle.onclick = () => run(async () => {
+ui.toggle.onclick = () => {
   const t = current();
-  if (!t) return;
-  ui.toggle.textContent = t.connected ? "Deactivating…" : "Activating…";
-  await invoke(t.connected ? "disconnect" : "connect", { name: t.name });
-  await refresh();
-});
+  if (t) toggleTunnel(t);
+};
 
 // Keep the status current, including changes made from Settings or the command line.
 refresh();

@@ -15,10 +15,28 @@ pub const PACKAGE_NAME: &str = "RasmusKoit.Tunnelik";
 /// Application id of the config editor in package/AppxManifest.xml.
 pub const APP_ID: &str = "App";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Disconnected,
+    /// Dialing, or otherwise on the way up.
+    Connecting,
+    Connected,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Disconnected => "disconnected",
+            State::Connecting => "connecting",
+            State::Connected => "connected",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tunnel {
     pub name: String,
-    pub connected: bool,
+    pub state: State,
 }
 
 /// Checks a config the way the plugin will read it, so mistakes show up before saving.
@@ -29,11 +47,11 @@ pub fn validate(config_text: &str) -> Result<(), String> {
 }
 
 pub fn list() -> Result<Vec<Tunnel>, String> {
-    let connected = connected_names();
+    let connections = connections();
     Ok(store::list(&local_state()?)
         .into_iter()
         .map(|name| Tunnel {
-            connected: connected.contains(&name),
+            state: state_of(&connections, &name),
             name,
         })
         .collect())
@@ -138,7 +156,7 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
 
 pub fn remove(name: &str) -> Result<(), String> {
     profile::validate_name(name)?;
-    if connected_names().iter().any(|n| n == name) {
+    if state_of(&connections(), name) != State::Disconnected {
         disconnect(name)?;
     }
     powershell(
@@ -149,8 +167,17 @@ pub fn remove(name: &str) -> Result<(), String> {
     store::remove(&local_state()?, name)
 }
 
+/// Connects a tunnel, first disconnecting any other Tunnelik tunnel: Windows runs only one
+/// connection per VPN plugin, and a second one never reaches the plugin and hangs at connecting.
 pub fn connect(name: &str) -> Result<(), String> {
     ensure_exists(name)?;
+    let ours = store::list(&local_state()?);
+    for (other, state) in connections() {
+        let is_ours = ours.iter().any(|n| n.eq_ignore_ascii_case(&other));
+        if is_ours && state != State::Disconnected && !other.eq_ignore_ascii_case(name) {
+            rasdial(&[&other, "/disconnect"])?;
+        }
+    }
     rasdial(&[name])
 }
 
@@ -178,9 +205,20 @@ pub fn open_app() -> Result<(), String> {
         .map_err(|e| format!("opening the app: {e}"))
 }
 
-/// Names of the VPN connections that are currently up.
-fn connected_names() -> Vec<String> {
-    use windows::Win32::NetworkManagement::Rras::{RASCONNW, RasEnumConnectionsW};
+/// VPN connection names compare case-insensitively in Windows.
+fn state_of(connections: &[(String, State)], name: &str) -> State {
+    connections
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map_or(State::Disconnected, |(_, s)| *s)
+}
+
+/// All VPN connections Windows currently has open or is opening, with their state.
+fn connections() -> Vec<(String, State)> {
+    use windows::Win32::NetworkManagement::Rras::{
+        RASCONNSTATUSW, RASCONNW, RASCS_Connected, RASCS_Disconnected, RasEnumConnectionsW,
+        RasGetConnectStatusW,
+    };
 
     const MAX: usize = 32;
     // SAFETY: RASCONNW is plain data, for which all zeroes is a valid value.
@@ -199,10 +237,24 @@ fn connected_names() -> Vec<String> {
         .iter()
         .take(count as usize)
         .map(|c| {
-            // Copied out because the struct is packed.
-            let name = c.szEntryName;
+            // Copied out because the structs are packed.
+            let (name, handle) = (c.szEntryName, c.hrasconn);
             let len = name.iter().position(|&ch| ch == 0).unwrap_or(name.len());
-            String::from_utf16_lossy(&name[..len])
+
+            // SAFETY: plain data, all zeroes is valid; dwSize is set before the call.
+            let mut status: RASCONNSTATUSW = unsafe { std::mem::zeroed() };
+            status.dwSize = size_of::<RASCONNSTATUSW>() as u32;
+            // SAFETY: `handle` came from RasEnumConnectionsW; `status` is a valid out pointer.
+            let state = match unsafe { RasGetConnectStatusW(handle, &mut status) } {
+                0 => match status.rasconnstate {
+                    s if s == RASCS_Connected => State::Connected,
+                    s if s == RASCS_Disconnected => State::Disconnected,
+                    _ => State::Connecting,
+                },
+                // The connection went away between the two calls.
+                _ => State::Disconnected,
+            };
+            (String::from_utf16_lossy(&name[..len]), state)
         })
         .collect()
 }

@@ -11,7 +11,8 @@ mod commands {
     #[derive(Serialize)]
     pub struct Tunnel {
         name: String,
-        connected: bool,
+        /// "disconnected", "connecting" or "connected".
+        state: &'static str,
     }
 
     /// Runs slow work (PowerShell, rasdial) off the UI's event loop.
@@ -30,7 +31,7 @@ mod commands {
                 .into_iter()
                 .map(|t| Tunnel {
                     name: t.name,
-                    connected: t.connected,
+                    state: t.state.as_str(),
                 })
                 .collect())
         })

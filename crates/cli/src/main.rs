@@ -7,7 +7,7 @@ const USAGE: &str = "usage:
   tunnelik                          open the app
   tunnelik add <name> <file.conf>   add a tunnel, or replace its config
   tunnelik remove <name>            remove a tunnel
-  tunnelik up <name>                connect
+  tunnelik up <name>                connect (disconnects any other Tunnelik tunnel)
   tunnelik down <name>              disconnect
   tunnelik list                     list tunnels and whether they are connected";
 
@@ -35,12 +35,7 @@ fn main() -> ExitCode {
                 println!("No tunnels yet. Add one with: tunnelik add <name> <file.conf>");
             }
             for t in tunnels {
-                let state = if t.connected {
-                    "connected"
-                } else {
-                    "disconnected"
-                };
-                println!("{:<24} {state}", t.name);
+                println!("{:<24} {}", t.name, t.state.as_str());
             }
         }),
         ["-h" | "--help" | "help"] => {
