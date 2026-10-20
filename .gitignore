@@ -1,0 +1,15 @@
+/target/
+
+# Tunnel configs contain private keys
+*.conf
+
+# Signing certificates
+*.pfx
+*.p12
+
+# Packaging output
+*.msix
+*.appx
+/AppPackages/
+
+node_modules/
