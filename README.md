@@ -1,98 +1,118 @@
 # Tunnelik
 
-**A client for WireGuard® that lives in Windows 11's own VPN settings.** Add a WireGuard config
-once, then connect and disconnect from **Settings → Network & internet → VPN**, the network
-flyout, or the `tunnelik` command.
+**WireGuard® tunnels in Windows 11's own VPN settings.**
 
-Tunnelik is an independent project. It is not affiliated with, endorsed by, or sponsored by the
-WireGuard project. See [Trademarks](#trademarks).
+Add a tunnel once, from the same `.conf` file the official apps use. From then on it is just
+another VPN to Windows: toggle it from **Settings → Network & internet → VPN**, the network
+flyout in the taskbar, the Tunnelik window, or `tunnelik up <name>`. The official WireGuard app
+is not needed.
+
+Tunnelik is an independent project, not affiliated with or endorsed by the WireGuard project.
+See [Trademarks](#trademarks).
+
+## Features
+
+- **Native toggle**: connect and disconnect wherever Windows shows VPNs, including the flyout.
+- **Standard configs**: paste or import a `wg-quick` style `.conf`, with one or several peers.
+- **Secrets stay put**: configs are encrypted with DPAPI for your Windows user; the overview
+  never shows a private key, and editing is the only time the full config is loaded.
+- **Stays up**: survives sleep and lock, rekeys on schedule, and reconnects by itself within
+  about five seconds when you switch networks.
+- **Live view**: latest handshake and bytes transferred per peer in the window.
+- **Window and command line**: the same tunnels, managed from either.
+
+## Install
+
+Grab `Tunnelik-<version>-x64.msix` and `Tunnelik.cer` from the
+[latest release](https://github.com/RasmusKoit/tunnelik/releases/latest).
+
+The package is signed with a self-signed certificate, so Windows needs to trust it once. From an
+**administrator** PowerShell:
+
+```powershell
+Import-Certificate -FilePath .\Tunnelik.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+```
+
+Then double-click the `.msix` (or run `Add-AppxPackage .\Tunnelik-<version>-x64.msix`). Later
+versions install over it as updates.
+
+## Use
+
+Open **Tunnelik** from the Start menu, click **Add tunnel**, paste or import a config, and
+**Save**. The tunnel now appears in Settings → VPN like any other; the switch next to its name in
+Tunnelik does the same thing.
+
+The same from a terminal:
+
+| Command | Does |
+|---|---|
+| `tunnelik` | Opens the window |
+| `tunnelik add <name> <file.conf>` | Adds a tunnel, or replaces its config |
+| `tunnelik up <name>` / `tunnelik down <name>` | Connects / disconnects |
+| `tunnelik list` | Lists tunnels and their state |
+| `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
+| `tunnelik repair` | Recreates VPN profiles Windows dropped (see below) |
+
+Good to know:
+
+- Windows runs **one connection per VPN plugin**, so connecting a tunnel disconnects any other
+  Tunnelik tunnel.
+- When you **switch networks**, the tunnel comes back on its own, but Windows recreates the VPN
+  interface to do it, which cuts connections that were open through the tunnel (SSH, rsync,
+  downloads). Pings and new connections carry on.
+- Windows **deletes a plugin's VPN profiles** when the package is uninstalled. The configs
+  survive; `tunnelik repair` (which the window also runs when it opens) brings the profiles back.
+- `PreUp`/`PostUp` scripts and `Table = off` are refused rather than ignored; everything else in
+  a `wg-quick` config is understood.
+- The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
 
 ## How it works
 
-- **VPN plugin** (Rust, `windows` crate): implements Windows' `IVpnPlugIn`. Windows calls it on
-  Connect/Disconnect and hands it the tunnel's packets through `VpnChannel`. The WireGuard
-  protocol itself comes from [BoringTun](https://github.com/cloudflare/boringtun). When the
-  machine switches networks, the plugin notices within a second or two and has Windows
-  reconnect the tunnel, which takes about five seconds. Pings and new connections carry on;
-  connections that were open through the tunnel (SSH, rsync, downloads) are cut, since Windows
-  recreates the VPN interface.
-- **Tunnel storage**: each config is encrypted with DPAPI for your Windows user and saved in the
-  package's data folder. The VPN profile only holds the tunnel's name.
-- **`tunnelik` command and window**: the command adds, removes, connects and lists tunnels; the
-  window (a Tauri app) does the same with an overview of each tunnel and live transfer stats.
-- **Packaging**: an MSIX package whose hidden "Plugin" app hosts the plugin. During development
-  it is registered straight from a folder, which needs Developer Mode but no signing.
+Windows lets a packaged app provide a VPN through `IVpnPlugIn`: Windows owns the VPN interface,
+routes and DNS, and hands the plugin packets to encrypt and datagrams to decrypt. Tunnelik's
+plugin does exactly that, with [BoringTun](https://github.com/cloudflare/boringtun) speaking the
+WireGuard protocol and a timer thread for handshakes and keepalives.
 
-The official WireGuard app is not needed.
+| Path | What |
+|---|---|
+| `crates/wgconf` | Parser for WireGuard `.conf` files |
+| `crates/plugin` | The VPN plugin: WireGuard sessions, Windows glue, the encrypted tunnel store |
+| `crates/host` | `tunnelik_host.exe`, the process Windows starts the plugin in |
+| `crates/manage` | Adding, removing and connecting tunnels, shared by the window and the command |
+| `crates/app` | The window (Tauri, plain HTML/JS) |
+| `crates/cli` | The `tunnelik` command |
+| `package` | MSIX manifest and icons |
+| `scripts` | Build, sign and install |
 
-## Layout
+A VPN profile in Windows holds nothing but the tunnel's name. The config itself lives, encrypted,
+in the package's data folder, where only the same Windows user can read it.
 
-| Path            | What                                                         |
-|-----------------|--------------------------------------------------------------|
-| `crates/wgconf` | Parser for WireGuard `.conf` files                           |
-| `crates/plugin` | VPN plugin and encrypted tunnel store                        |
-| `crates/host`   | `tunnelik_host.exe`, the process Windows runs the plugin in  |
-| `crates/manage` | Adding, removing and connecting tunnels, shared by CLI and app |
-| `crates/cli`    | The `tunnelik` command                                       |
-| `package`       | MSIX manifest and icons                                      |
+## Build
 
-## Prerequisites
+Rust and the MSVC build tools:
 
-```
+```powershell
 winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
 winget install --id Rustlang.Rustup
 ```
 
-## Build the installer
+Then:
 
-```
+```powershell
+cargo test
 .\scripts\package.ps1
 ```
 
-This builds `target\Tunnelik-<version>-x64.msix`, signed with a self-signed certificate that
-`scripts\new-cert.ps1` creates on first use (its private key stays in your user certificate
-store). Windows installs the package once that certificate is trusted, which takes one command
-in an **admin** PowerShell:
-
-```
-Import-Certificate -FilePath target\Tunnelik.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-```
-
-Then double-click the `.msix`, or run `Add-AppxPackage target\Tunnelik-<version>-x64.msix`.
-Bump the version in `package\AppxManifest.xml` for each release so it installs as an update.
-
-## Use it
-
-Open **Tunnelik** from the Start menu, or from a terminal:
-
-```
-tunnelik add Home C:\path\to\home.conf
-tunnelik up Home
-tunnelik list
-```
-
-Or connect **Home** from Settings → Network & internet → VPN. Windows runs one connection per VPN
-plugin, so connecting a tunnel disconnects any other Tunnelik tunnel. The plugin logs to
-`%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
-
-If Windows dropped the VPN connections (it does when the package is uninstalled and installed
-again), `tunnelik repair` recreates them from the saved configs; the app does this when it opens.
-
-Limitations for now: one `[Peer]` per tunnel.
-
-## Development install
+`package.ps1` builds `target\Tunnelik-<version>-x64.msix` and signs it. On first use
+`scripts\new-cert.ps1` creates the self-signed certificate (its private key stays in your user
+certificate store) and exports `target\Tunnelik.cer`, which is what other machines trust. Bump
+the version in `package\AppxManifest.xml` for each release so it installs as an update.
 
 For quicker iterations, `.\scripts\install-dev.ps1` registers the build straight from
-`target\appx` without signing. It needs **Settings → System → For developers → Developer Mode**.
+`target\appx` without signing; it needs **Settings → System → For developers → Developer Mode**.
 A development install and the signed package can't replace each other: remove one with
 `Remove-AppxPackage -PreserveApplicationData` before installing the other, then run
 `tunnelik repair`.
-
-## Test
-
-```
-cargo test
-```
 
 ## License
 
