@@ -4,3 +4,6 @@ members = ["crates/wgconf", "crates/plugin", "crates/host", "crates/manage", "cr
 
 [workspace.package]
 edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Rasmus Koit"]
+repository = "https://github.com/RasmusKoit/tunnelik"

@@ -89,6 +89,19 @@ A development install and the signed package can't replace each other: remove on
 cargo test
 ```
 
+## License
+
+Tunnelik is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+Tunnelik by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without
+any additional terms or conditions.
+
 ## Acknowledgements
 
 Tunnelik builds on the work of others:

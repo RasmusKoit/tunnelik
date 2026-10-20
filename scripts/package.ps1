@@ -34,7 +34,7 @@ Copy-Item -Recurse "$root\package\Assets" $stage
 foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe') {
     Copy-Item "$root\target\release\$file" $stage
 }
-Copy-Item "$root\THIRD_PARTY_NOTICES.md", "$root\README.md" $stage
+Copy-Item "$root\README.md", "$root\LICENSE-MIT", "$root\LICENSE-APACHE", "$root\THIRD_PARTY_NOTICES.md" $stage
 
 $msix = "$root\target\Tunnelik-$Version-x64.msix"
 & "$sdk\makeappx.exe" pack /o /d $stage /p $msix | Out-Null

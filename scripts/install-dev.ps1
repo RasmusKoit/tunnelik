@@ -38,7 +38,7 @@ Copy-Item -Recurse -Force "$root\package\Assets" $out
 foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe') {
     Copy-Item -Force "$root\target\$profileName\$file" $out
 }
-Copy-Item -Force "$root\THIRD_PARTY_NOTICES.md", "$root\README.md" $out -ErrorAction SilentlyContinue
+Copy-Item -Force "$root\README.md", "$root\LICENSE-MIT", "$root\LICENSE-APACHE", "$root\THIRD_PARTY_NOTICES.md" $out -ErrorAction SilentlyContinue
 
 # The plugin runs sandboxed and can only start if app packages may read this folder. Folders
 # under the user profile don't allow that by default. S-1-15-2-1 is ALL APPLICATION PACKAGES.
