@@ -1,0 +1,19 @@
+# cargo-about config: generates THIRD_PARTY_NOTICES.md with `scripts\notices.ps1`.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    # File-level copyleft (Tauri's CSS parsing crates); fine to ship, they stay unmodified.
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Our own crates are not third-party.
+private = { ignore = true }

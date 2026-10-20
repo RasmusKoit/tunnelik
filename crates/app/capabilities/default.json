@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window: core APIs only; Tunnelik's own commands are always allowed.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

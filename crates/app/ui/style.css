@@ -1,0 +1,152 @@
+:root {
+  --bg: #f3f3f3;
+  --panel: #fbfbfb;
+  --surface: #ffffff;
+  --border: #e3e3e3;
+  --text: #1b1b1b;
+  --muted: #616161;
+  --accent: #0e7490;
+  --accent-text: #ffffff;
+  --accent-hover: #0c6178;
+  --ok: #0f7b0f;
+  --bad: #c42b1c;
+  --selected: #e8f1f4;
+  --radius: 6px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202020;
+    --panel: #272727;
+    --surface: #2d2d2d;
+    --border: #3a3a3a;
+    --text: #f0f0f0;
+    --muted: #a8a8a8;
+    --accent: #3fb6d1;
+    --accent-text: #0b2a33;
+    --accent-hover: #5fc4db;
+    --ok: #6ccb5f;
+    --bad: #ff99a4;
+    --selected: #1f3a42;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.92em; }
+a { color: var(--accent); }
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 12px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+
+.brand h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+
+.tunnels { list-style: none; margin: 0; padding: 0; flex: 1; overflow: auto; }
+.tunnels li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.tunnels li:hover { background: var(--surface); }
+.tunnels li.selected { background: var(--selected); }
+.tunnels .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border); flex: none; }
+.tunnels .dot.on { background: var(--ok); }
+.tunnels .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+main {
+  display: flex;
+  flex-direction: column;
+  padding: 18px 22px 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.empty { margin: auto; max-width: 440px; text-align: center; color: var(--muted); }
+.empty h2 { color: var(--text); font-weight: 600; font-size: 18px; }
+
+.editor { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.editor-head, .editor-foot { display: flex; align-items: center; gap: 10px; }
+.spacer { flex: 1; }
+
+.name {
+  flex: 1;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  padding: 4px 8px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+.name:focus, .name:hover { border-color: var(--border); background: var(--surface); outline: none; }
+.name[readonly] { pointer-events: none; }
+
+.state { color: var(--muted); font-size: 13px; }
+.state.on { color: var(--ok); }
+
+.config {
+  flex: 1;
+  min-height: 160px;
+  resize: none;
+  padding: 12px;
+  font: 13px/1.5 "Cascadia Mono", Consolas, monospace;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.config:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.check { margin: 0; min-height: 1.45em; font-size: 13px; color: var(--muted); }
+.check.ok { color: var(--ok); }
+.check.bad { color: var(--bad); }
+
+.button {
+  font: inherit;
+  padding: 6px 14px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.button:hover { filter: brightness(0.97); }
+.button:disabled { opacity: 0.5; cursor: default; }
+.button.primary { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
+.button.primary:hover { background: var(--accent-hover); }
+.button.danger { color: var(--bad); }
+
+.error {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  color: var(--bad);
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+}
+
+.legal { margin-top: 12px; font-size: 11px; color: var(--muted); }

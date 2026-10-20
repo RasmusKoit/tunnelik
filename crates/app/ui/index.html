@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tunnelik</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <header class="brand">
+      <h1>Tunnelik</h1>
+      <p>A client for WireGuard®</p>
+    </header>
+    <ul id="tunnels" class="tunnels" aria-label="Tunnels"></ul>
+    <button id="new" class="button">+ Add tunnel</button>
+  </aside>
+
+  <main id="main">
+    <section id="empty" class="empty">
+      <h2>No tunnel selected</h2>
+      <p>Add a tunnel by pasting a WireGuard config, or importing a <code>.conf</code> file.
+         Then connect it here, from Settings &rsaquo; Network &amp; internet &rsaquo; VPN,
+         or with <code>tunnelik up &lt;name&gt;</code>.</p>
+    </section>
+
+    <section id="editor" class="editor" hidden>
+      <div class="editor-head">
+        <input id="name" class="name" placeholder="Tunnel name" spellcheck="false" autocomplete="off">
+        <span id="state" class="state"></span>
+        <button id="toggle" class="button primary"></button>
+      </div>
+      <textarea id="config" class="config" spellcheck="false"
+        placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.0.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …&#10;AllowedIPs = 10.0.0.0/8&#10;Endpoint = vpn.example.com:51820"></textarea>
+      <p id="check" class="check" role="status"></p>
+      <div class="editor-foot">
+        <label class="button">Import .conf<input id="import" type="file" accept=".conf,text/plain" hidden></label>
+        <span class="spacer"></span>
+        <button id="delete" class="button danger">Delete</button>
+        <button id="save" class="button primary">Save</button>
+      </div>
+    </section>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <footer class="legal">
+      “WireGuard” is a registered trademark of Jason A. Donenfeld. Tunnelik is not affiliated with
+      the WireGuard project. WireGuard protocol by <a href="https://github.com/cloudflare/boringtun">BoringTun</a>.
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

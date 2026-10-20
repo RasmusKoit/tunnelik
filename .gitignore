@@ -13,3 +13,6 @@
 /AppPackages/
 
 node_modules/
+
+# Tauri build output
+/crates/app/gen/

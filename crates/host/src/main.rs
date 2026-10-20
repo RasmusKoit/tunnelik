@@ -17,8 +17,8 @@ fn main() -> windows_core::Result<()> {
 
     impl IGetActivationFactory_Impl for Factories_Impl {
         fn GetActivationFactory(&self, class: &HSTRING) -> Result<IInspectable> {
-            wgw11_plugin::file_log(&format!("host: factory requested for {class}"));
-            match wgw11_plugin::activation_factory(class) {
+            tunnelik_plugin::file_log(&format!("host: factory requested for {class}"));
+            match tunnelik_plugin::activation_factory(class) {
                 Some(factory) => factory.cast(),
                 None => Err(Error::new(
                     CLASS_E_CLASSNOTAVAILABLE,
@@ -29,10 +29,10 @@ fn main() -> windows_core::Result<()> {
     }
 
     std::panic::set_hook(Box::new(|info| {
-        wgw11_plugin::file_log(&format!("host panicked: {info}"))
+        tunnelik_plugin::file_log(&format!("host panicked: {info}"))
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    wgw11_plugin::file_log(&format!("host: started with {args:?}"));
+    tunnelik_plugin::file_log(&format!("host: started with {args:?}"));
 
     // CoreApplication must first be used from the multithreaded apartment.
     // SAFETY: called once, on the main thread, before any other WinRT use.
@@ -40,7 +40,7 @@ fn main() -> windows_core::Result<()> {
 
     let factories: IGetActivationFactory = Factories.into();
     let result = CoreApplication::RunWithActivationFactories(&factories);
-    wgw11_plugin::file_log(&format!("host: exiting with {result:?}"));
+    tunnelik_plugin::file_log(&format!("host: exiting with {result:?}"));
     result
 }
 

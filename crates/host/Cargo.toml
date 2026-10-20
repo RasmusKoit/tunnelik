@@ -1,14 +1,15 @@
 [package]
-name = "wgw11-host"
+name = "tunnelik-host"
 version = "0.1.0"
 edition.workspace = true
+publish = false
 description = "Process Windows starts to run the VPN plugin"
 
 [[bin]]
-name = "wgw11_host"
+name = "tunnelik_host"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
-wgw11-plugin = { path = "../plugin" }
+tunnelik-plugin = { path = "../plugin" }
 windows-core = "0.62"
 windows = { version = "0.62", features = ["ApplicationModel_Core", "Foundation", "Win32_System_WinRT"] }

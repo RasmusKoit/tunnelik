@@ -1,7 +1,11 @@
-# wireguard-w11
+# Tunnelik
 
-WireGuard tunnels as native Windows 11 VPN connections. Add a WireGuard config once,
-then connect and disconnect from **Settings → Network & internet → VPN** or the network flyout.
+**A client for WireGuard® that lives in Windows 11's own VPN settings.** Add a WireGuard config
+once, then connect and disconnect from **Settings → Network & internet → VPN**, the network
+flyout, or the `tunnelik` command.
+
+Tunnelik is an independent project. It is not affiliated with, endorsed by, or sponsored by the
+WireGuard project. See [Trademarks](#trademarks).
 
 ## How it works
 
@@ -10,22 +14,22 @@ then connect and disconnect from **Settings → Network & internet → VPN** or 
   protocol itself comes from [BoringTun](https://github.com/cloudflare/boringtun).
 - **Tunnel storage**: each config is encrypted with DPAPI for your Windows user and saved in the
   package's data folder. The VPN profile only holds the tunnel's name.
-- **Adding tunnels**: the `wgw11` command for now; a Tauri editor app is planned.
+- **`tunnelik` command**: adds, removes, connects and lists tunnels; a Tauri app is in progress.
 - **Packaging**: an MSIX package whose hidden "Plugin" app hosts the plugin. During development
   it is registered straight from a folder, which needs Developer Mode but no signing.
 
-The official WireGuard app is not used.
+The official WireGuard app is not needed.
 
 ## Layout
 
-| Path            | What                                              | Status  |
-|-----------------|---------------------------------------------------|---------|
-| `crates/wgconf` | Parser for WireGuard `.conf` files                | Done    |
-| `crates/plugin` | VPN plugin and encrypted tunnel store             | Works: connects, carries traffic, disconnects |
-| `crates/host`   | `wgw11_host.exe`, the process Windows runs the plugin in | Builds |
-| `crates/cli`    | `wgw11` command to add, remove and list tunnels   | Builds  |
-| `package`       | MSIX manifest and icons                           | Validates with MakeAppx |
-| `app`           | Tauri config editor                               | Planned |
+| Path            | What                                                         |
+|-----------------|--------------------------------------------------------------|
+| `crates/wgconf` | Parser for WireGuard `.conf` files                           |
+| `crates/plugin` | VPN plugin and encrypted tunnel store                        |
+| `crates/host`   | `tunnelik_host.exe`, the process Windows runs the plugin in  |
+| `crates/manage` | Adding, removing and connecting tunnels, shared by CLI and app |
+| `crates/cli`    | The `tunnelik` command                                       |
+| `package`       | MSIX manifest and icons                                      |
 
 ## Prerequisites
 
@@ -40,16 +44,40 @@ Turn on **Settings → System → For developers → Developer Mode**.
 
 ```
 .\scripts\install-dev.ps1
-.\target\release\wgw11.exe add Home C:\path\to\home.conf
+.\target\release\tunnelik.exe add Home C:\path\to\home.conf
+.\target\release\tunnelik.exe up Home
 ```
 
-Then connect **Home** from Settings → Network & internet → VPN, or with `rasdial Home`.
-The plugin logs to `%LOCALAPPDATA%\Packages\WireGuardW11_<id>\LocalState\plugin.log`.
+Or connect **Home** from Settings → Network & internet → VPN. The plugin logs to
+`%LOCALAPPDATA%\Packages\Tunnelik_<id>\LocalState\plugin.log`.
 
-Limitations for now: one `[Peer]` per tunnel; editing a tunnel means running `add` again.
+Limitations for now: one `[Peer]` per tunnel.
 
 ## Test
 
 ```
 cargo test
 ```
+
+## Acknowledgements
+
+Tunnelik builds on the work of others:
+
+- **[WireGuard®](https://www.wireguard.com/)** by Jason A. Donenfeld: the protocol Tunnelik
+  speaks, and the `.conf` format it reads.
+- **[BoringTun](https://github.com/cloudflare/boringtun)** by Cloudflare (BSD-3-Clause): the
+  WireGuard protocol implementation used for handshakes and encryption.
+- **[windows-rs](https://github.com/microsoft/windows-rs)** by Microsoft (MIT or Apache-2.0):
+  Rust bindings for the Windows APIs.
+- **[UwpVpnPluginSample](https://github.com/microsoft/UwpVpnPluginSample)** by Microsoft (MIT):
+  showed how a VPN plugin package is laid out.
+- **[WSSHVpnPlugin](https://github.com/poizan42/WSSHVpnPlugin)** by poizan42: its notes on the
+  Windows VPN platform's undocumented behaviour (IPv6 requirement, start and stop deadlocks,
+  plugin instance reuse) saved a lot of debugging. No code was copied.
+
+The licenses of all third-party crates are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Trademarks
+
+"WireGuard" and the "WireGuard" logo are registered trademarks of Jason A. Donenfeld.
+Tunnelik uses the name only to describe what it is compatible with.

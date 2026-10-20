@@ -1,6 +1,6 @@
 //! What a VPN profile stores about its tunnel.
 //!
-//! The profile only names the tunnel, as `<WireGuard tunnel="Home"/>`; the config itself lives in
+//! The profile only names the tunnel, as `<Tunnelik tunnel="Home"/>`; the config itself lives in
 //! the encrypted store. Windows hands this XML to the plugin as `VpnChannelConfiguration.CustomField`.
 
 /// Tunnel names become file names and VPN connection names, so they are kept simple.
@@ -22,7 +22,7 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 }
 
 pub fn custom_configuration(name: &str) -> String {
-    format!("<WireGuard tunnel=\"{name}\"/>")
+    format!("<Tunnelik tunnel=\"{name}\"/>")
 }
 
 pub fn tunnel_name(custom_field: &str) -> Result<String, String> {
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn accepts_rewritten_xml() {
-        let xml = "<?xml version=\"1.0\"?>\r\n<WireGuard tunnel='office-1' />";
+        let xml = "<?xml version=\"1.0\"?>\r\n<Tunnelik tunnel='office-1' />";
         assert_eq!(tunnel_name(xml).unwrap(), "office-1");
     }
 
@@ -66,17 +66,17 @@ mod tests {
     fn rejects_bad_profiles() {
         assert!(tunnel_name("").unwrap_err().contains("does not name"));
         assert!(
-            tunnel_name("<WireGuard tunnel=x/>")
+            tunnel_name("<Tunnelik tunnel=x/>")
                 .unwrap_err()
                 .contains("not quoted")
         );
         assert!(
-            tunnel_name("<WireGuard tunnel=\"x/>")
+            tunnel_name("<Tunnelik tunnel=\"x/>")
                 .unwrap_err()
                 .contains("not closed")
         );
         assert!(
-            tunnel_name("<WireGuard tunnel=\"..\\x\"/>")
+            tunnel_name("<Tunnelik tunnel=\"..\\x\"/>")
                 .unwrap_err()
                 .contains("invalid")
         );

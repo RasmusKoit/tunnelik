@@ -36,7 +36,7 @@ use crate::winrt::{Context, E_FAIL, host_names, read_buffer, write_buffer};
 use crate::{profile, settings, store};
 
 /// Class name the package manifest registers for the background task.
-pub const TASK_CLASS: &str = "WireGuardW11.VpnBackgroundTask";
+pub const TASK_CLASS: &str = "Tunnelik.VpnBackgroundTask";
 
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);

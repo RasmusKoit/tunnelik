@@ -2,19 +2,22 @@
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  IgnorableNamespaces="uap uap5 desktop4 rescap">
 
-  <Identity Name="WireGuardW11" Publisher="CN=wireguard-w11" Version="0.1.0.0" ProcessorArchitecture="x64" />
+  <Identity Name="Tunnelik" Publisher="CN=Tunnelik" Version="0.1.0.0" ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>WireGuard W11</DisplayName>
+    <DisplayName>Tunnelik</DisplayName>
     <PublisherDisplayName>Rasmus Koit</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
 
   <Resources>
@@ -23,21 +26,41 @@
 
   <Applications>
     <!--
-      Hidden app whose only job is hosting the VPN plugin. Windows starts wgw11_host.exe and
+      The window, in the Start menu as "Tunnelik". It also owns the `tunnelik` command: the alias
+      runs the console program tunnelik.exe, which opens this window when run without arguments.
+    -->
+    <Application Id="App" Executable="tunnelik-app.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Tunnelik"
+        Description="A client for WireGuard®"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        BackgroundColor="transparent" />
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias" Executable="tunnelik.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap5:AppExecutionAlias desktop4:Subsystem="console">
+            <uap5:ExecutionAlias Alias="tunnelik.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+
+    <!--
+      Hidden app whose only job is hosting the VPN plugin. Windows starts tunnelik_host.exe and
       creates the background task class in it for every VPN event (connect, packets, disconnect).
       Windows has no dedicated VPN plugin extension; a "vpnClient" background task is what makes
       the package show up as a VPN provider.
     -->
-    <Application Id="Plugin" Executable="wgw11_host.exe">
+    <Application Id="Plugin" Executable="tunnelik_host.exe">
       <uap:VisualElements
-        DisplayName="WireGuard W11"
-        Description="WireGuard VPN plugin"
+        DisplayName="Tunnelik"
+        Description="Tunnelik VPN plugin"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"
         BackgroundColor="transparent"
         AppListEntry="none" />
       <Extensions>
-        <Extension Category="windows.backgroundTasks" Executable="wgw11_host.exe" EntryPoint="WireGuardW11.VpnBackgroundTask">
+        <Extension Category="windows.backgroundTasks" Executable="tunnelik_host.exe" EntryPoint="Tunnelik.VpnBackgroundTask">
           <BackgroundTasks>
             <uap:Task Type="vpnClient" />
           </BackgroundTasks>
@@ -50,16 +73,17 @@
     <Capability Name="internetClient" />
     <Capability Name="internetClientServer" />
     <Capability Name="privateNetworkClientServer" />
-    <!-- Restricted: fine for sideloading, needs Microsoft's approval for the Store. -->
+    <!-- Restricted: fine for sideloading, need Microsoft's approval for the Store. -->
     <rescap:Capability Name="networkingVpnProvider" />
+    <rescap:Capability Name="runFullTrust" />
   </Capabilities>
 
   <!-- Windows requires the background task class to be registered; the DLL exports its factory. -->
   <Extensions>
     <Extension Category="windows.activatableClass.inProcessServer">
       <InProcessServer>
-        <Path>wgw11_plugin.dll</Path>
-        <ActivatableClass ActivatableClassId="WireGuardW11.VpnBackgroundTask" ThreadingModel="both" />
+        <Path>tunnelik_plugin.dll</Path>
+        <ActivatableClass ActivatableClassId="Tunnelik.VpnBackgroundTask" ThreadingModel="both" />
       </InProcessServer>
     </Extension>
   </Extensions>

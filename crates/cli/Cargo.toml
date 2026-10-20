@@ -1,13 +1,13 @@
 [package]
-name = "wgw11-cli"
+name = "tunnelik-cli"
 version = "0.1.0"
 edition.workspace = true
-description = "Adds, removes and lists WireGuard tunnels as Windows VPN connections"
+publish = false
+description = "The tunnelik command: manage tunnels from the terminal, or open the app"
 
 [[bin]]
-name = "wgw11"
+name = "tunnelik"
 path = "src/main.rs"
 
-[dependencies]
-wgconf = { path = "../wgconf" }
-wgw11-plugin = { path = "../plugin" }
+[target.'cfg(windows)'.dependencies]
+tunnelik-manage = { path = "../manage" }

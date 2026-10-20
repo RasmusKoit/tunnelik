@@ -1,0 +1,24 @@
+# Third-party notices
+
+Tunnelik includes the following third-party software. Generated with
+[cargo-about](https://github.com/EmbarkStudios/cargo-about) by `scripts\notices.ps1`; do not edit by hand.
+
+## Overview
+
+{{#each overview}}
+- {{{name}}} ({{count}} crates)
+{{/each}}
+
+{{#each licenses}}
+## {{{name}}}
+
+Used by:
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}
