@@ -117,6 +117,16 @@ function showEditor() {
   ui.editor.hidden = false;
 }
 
+function closeEditor() {
+  selected = null;
+  savedConfig = "";
+  ui.name.value = "";
+  ui.config.value = "";
+  ui.check.textContent = "";
+  ui.editor.hidden = true;
+  ui.empty.hidden = false;
+}
+
 let validateTimer;
 function validate() {
   clearTimeout(validateTimer);
@@ -167,9 +177,7 @@ ui.del.onclick = () => {
   if (!confirm(`Delete tunnel "${selected}"? Its config will be removed from this PC.`)) return;
   run(async () => {
     await invoke("remove_tunnel", { name: selected });
-    selected = null;
-    ui.editor.hidden = true;
-    ui.empty.hidden = false;
+    closeEditor();
     await refresh();
   });
 };
