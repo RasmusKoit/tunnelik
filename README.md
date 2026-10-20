@@ -1,42 +1,96 @@
+<div align="center">
+
+<img src="docs/logo.png" alt="Tunnelik logo" width="128" height="128">
+
 # Tunnelik
 
 **WireGuard® tunnels in Windows 11's own VPN settings.**
 
-Add a tunnel once, from the same `.conf` file the official apps use. From then on it is just
-another VPN to Windows: toggle it from **Settings → Network & internet → VPN**, the network
-flyout in the taskbar, the Tunnelik window, or `tunnelik up <name>`. The official WireGuard app
-is not needed.
+Add a tunnel once, from the same `.conf` the official apps use.<br>
+From then on it is just another VPN to Windows.
 
-Tunnelik is an independent project, not affiliated with or endorsed by the WireGuard project.
-See [Trademarks](#trademarks).
+[![Latest release](https://img.shields.io/github/v/release/RasmusKoit/tunnelik?include_prereleases&label=release&color=0e7490)](https://github.com/RasmusKoit/tunnelik/releases/latest) [![Downloads](https://img.shields.io/github/downloads/RasmusKoit/tunnelik/total?color=0e7490)](https://github.com/RasmusKoit/tunnelik/releases) [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-blue)](#license) [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D4)](#install)
+
+[Install](#install) · [Use](#use) · [How it works](#how-it-works) · [Build](#build) · [License](#license)
+
+<br>
 
 ![The Tunnelik window: tunnels with their switches on the left, the selected tunnel's interface and peer on the right](docs/tunnelik-window.png)
 
-## Features
+</div>
 
-- **Native toggle**: connect and disconnect wherever Windows shows VPNs, including the flyout.
-- **Standard configs**: paste or import a `wg-quick` style `.conf`, with one or several peers.
-- **Secrets stay put**: configs are encrypted with DPAPI for your Windows user; the overview
-  never shows a private key, and editing is the only time the full config is loaded.
-- **Stays up**: survives sleep and lock, rekeys on schedule, and reconnects by itself within
-  about five seconds when you switch networks.
-- **Live view**: latest handshake and bytes transferred per peer in the window.
-- **Window and command line**: the same tunnels, managed from either.
+> Tunnelik is an independent project, not affiliated with or endorsed by the WireGuard project.
+> See [Trademarks](#trademarks).
+
+## Why Tunnelik?
+
+Windows 11 already has a VPN page, a switch in the network flyout, and a place for profiles.
+Tunnelik plugs WireGuard into all of that instead of adding a tray icon and a service of its
+own. Toggle a tunnel from **Settings → Network & internet → VPN**, the taskbar flyout, the
+Tunnelik window, or `tunnelik up <name>`. The official WireGuard app is not needed.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 🪟 Native toggle
+Connect and disconnect wherever Windows shows VPNs, including the network flyout in the taskbar.
+
+</td>
+<td width="33%" valign="top">
+
+### 📄 Standard configs
+Paste or import a `wg-quick` style `.conf`, with one or several peers. Nothing to convert.
+
+</td>
+<td width="33%" valign="top">
+
+### 🔐 Secrets stay put
+Configs are encrypted with DPAPI for your Windows user. The overview never shows a private key.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+### 🔁 Stays up
+Survives sleep and lock, rekeys on schedule, and reconnects by itself within about five seconds when you switch networks.
+
+</td>
+<td width="33%" valign="top">
+
+### 📊 Live view
+Latest handshake and bytes transferred per peer, right in the window.
+
+</td>
+<td width="33%" valign="top">
+
+### 🖥️ Window and command line
+The same tunnels, managed from either. Scripts and humans get the same features.
+
+</td>
+</tr>
+</table>
 
 ## Install
 
-Grab `Tunnelik-<version>-x64.msix` and `Tunnelik.cer` from the
+**1.** Grab `Tunnelik-<version>-x64.msix` and `Tunnelik.cer` from the
 [latest release](https://github.com/RasmusKoit/tunnelik/releases/latest).
 
-The package is signed with a self-signed certificate, so Windows needs to trust it once. From an
-**administrator** PowerShell:
+**2.** Trust the certificate once. The package is signed with a self-signed certificate, so from
+an **administrator** PowerShell:
 
 ```powershell
 Import-Certificate -FilePath .\Tunnelik.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
 ```
 
-Then double-click the `.msix` (or run `Add-AppxPackage .\Tunnelik-<version>-x64.msix`). Later
-versions install over it as updates.
+**3.** Double-click the `.msix`, or:
+
+```powershell
+Add-AppxPackage .\Tunnelik-<version>-x64.msix
+```
+
+Later versions install over it as updates.
 
 ## Use
 
@@ -55,10 +109,14 @@ The same from a terminal:
 | `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
 | `tunnelik repair` | Recreates VPN profiles Windows dropped (see below) |
 
-Good to know:
+> [!NOTE]
+> Windows runs **one connection per VPN plugin**, so connecting a tunnel disconnects any other
+> Tunnelik tunnel.
 
-- Windows runs **one connection per VPN plugin**, so connecting a tunnel disconnects any other
-  Tunnelik tunnel.
+<details>
+<summary><b>Good to know</b></summary>
+<br>
+
 - When you **switch networks**, the tunnel comes back on its own, but Windows recreates the VPN
   interface to do it, which cuts connections that were open through the tunnel (SSH, rsync,
   downloads). Pings and new connections carry on.
@@ -68,12 +126,34 @@ Good to know:
   a `wg-quick` config is understood.
 - The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
 
+</details>
+
 ## How it works
 
 Windows lets a packaged app provide a VPN through `IVpnPlugIn`: Windows owns the VPN interface,
 routes and DNS, and hands the plugin packets to encrypt and datagrams to decrypt. Tunnelik's
 plugin does exactly that, with [BoringTun](https://github.com/cloudflare/boringtun) speaking the
 WireGuard protocol and a timer thread for handshakes and keepalives.
+
+```
+ Settings / flyout / window / CLI
+               │  toggle
+               ▼
+   Windows VPN platform  ──  owns the interface, routes and DNS
+               │  IVpnPlugIn
+               ▼
+   tunnelik_host.exe  ──  Tunnelik plugin  ──  BoringTun (WireGuard protocol)
+               │
+               ▼
+     encrypted tunnel store  (DPAPI, per Windows user)
+```
+
+A VPN profile in Windows holds nothing but the tunnel's name. The config itself lives, encrypted,
+in the package's data folder, where only the same Windows user can read it.
+
+<details>
+<summary><b>Repository layout</b></summary>
+<br>
 
 | Path | What |
 |---|---|
@@ -86,8 +166,7 @@ WireGuard protocol and a timer thread for handshakes and keepalives.
 | `package` | MSIX manifest and icons |
 | `scripts` | Build, sign and install |
 
-A VPN profile in Windows holds nothing but the tunnel's name. The config itself lives, encrypted,
-in the package's data folder, where only the same Windows user can read it.
+</details>
 
 ## Build
 
@@ -110,11 +189,24 @@ cargo test
 certificate store) and exports `target\Tunnelik.cer`, which is what other machines trust. Bump
 the version in `package\AppxManifest.xml` for each release so it installs as an update.
 
-For quicker iterations, `.\scripts\install-dev.ps1` registers the build straight from
-`target\appx` without signing; it needs **Settings → System → For developers → Developer Mode**.
-A development install and the signed package can't replace each other: remove one with
-`Remove-AppxPackage -PreserveApplicationData` before installing the other, then run
-`tunnelik repair`.
+<details>
+<summary><b>Faster iteration with a development install</b></summary>
+<br>
+
+`.\scripts\install-dev.ps1` registers the build straight from `target\appx` without signing; it
+needs **Settings → System → For developers → Developer Mode**.
+
+> [!IMPORTANT]
+> A development install and the signed package can't replace each other: remove one with
+> `Remove-AppxPackage -PreserveApplicationData` before installing the other, then run
+> `tunnelik repair`.
+
+</details>
+
+## Contributing
+
+Issues and pull requests are welcome. `cargo test` runs the test suite; the
+[Build](#build) section covers producing an installable package.
 
 ## License
 
@@ -151,3 +243,10 @@ The licenses of all third-party crates are listed in [THIRD_PARTY_NOTICES.md](TH
 
 "WireGuard" and the "WireGuard" logo are registered trademarks of Jason A. Donenfeld.
 Tunnelik uses the name only to describe what it is compatible with.
+
+<div align="center">
+<br>
+
+If Tunnelik saved you a tray icon, a ⭐ on the repo helps others find it.
+
+</div>
