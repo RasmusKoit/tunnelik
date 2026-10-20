@@ -11,4 +11,4 @@ path = "src/main.rs"
 [target.'cfg(windows)'.dependencies]
 wgw11-plugin = { path = "../plugin" }
 windows-core = "0.62"
-windows = { version = "0.62", features = ["ApplicationModel_Core", "Foundation"] }
+windows = { version = "0.62", features = ["ApplicationModel_Core", "Foundation", "Win32_System_WinRT"] }

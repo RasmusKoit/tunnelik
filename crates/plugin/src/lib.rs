@@ -16,4 +16,4 @@ mod vpn;
 mod winrt;
 
 #[cfg(windows)]
-pub use vpn::{TASK_CLASS, activation_factory};
+pub use vpn::{TASK_CLASS, activation_factory, file_log};

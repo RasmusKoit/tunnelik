@@ -91,7 +91,11 @@ struct BackgroundTask;
 impl IBackgroundTask_Impl for BackgroundTask_Impl {
     fn Run(&self, task: Ref<IBackgroundTaskInstance>) -> Result<()> {
         let plugin: IVpnPlugIn = Plugin.into();
-        VpnChannel::ProcessEventAsync(&plugin, &task.ok()?.TriggerDetails()?)
+        let result = VpnChannel::ProcessEventAsync(&plugin, &task.ok()?.TriggerDetails()?);
+        if let Err(e) = &result {
+            file_log(&format!("handling a VPN event failed: {}", e.message()));
+        }
+        result
     }
 }
 
@@ -109,6 +113,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
     }
 
     fn Disconnect(&self, channel: Ref<VpnChannel>) -> Result<()> {
+        file_log("trace: Disconnect");
         stop_session();
         channel.ok()?.Stop()
     }
@@ -119,6 +124,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         packet: OutRef<VpnPacketBuffer>,
     ) -> Result<()> {
         // WireGuard sends its own keepalives from the timer thread.
+        trace_once(&TRACE_KEEPALIVE, "GetKeepAlivePayload");
         packet.write(None)
     }
 
@@ -128,8 +134,13 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         packets: Ref<VpnPacketBufferList>,
         encapsulated: Ref<VpnPacketBufferList>,
     ) -> Result<()> {
+        trace_once(&TRACE_ENCAP, "Encapsulate");
         let (channel, packets, encapsulated) = (channel.ok()?, packets.ok()?, encapsulated.ok()?);
         let Some(session) = current_session() else {
+            // Not connected yet: drop the packets, but hand the buffers back to Windows.
+            while packets.Size()? > 0 {
+                packets.RemoveAtBegin()?;
+            }
             return Ok(());
         };
         let mut tunnel = lock(&session.tunnel);
@@ -160,6 +171,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         decapsulated: Ref<VpnPacketBufferList>,
         control: Ref<VpnPacketBufferList>,
     ) -> Result<()> {
+        trace_once(&TRACE_DECAP, "Decapsulate");
         let channel = channel.ok()?;
         let Some(session) = current_session() else {
             return Ok(());
@@ -220,8 +232,21 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let ipv6 = host_list(s.ipv6_addresses.iter().map(ToString::to_string))?;
     let routes = routes(s).context("setting up routes")?;
     let dns = dns(s).context("setting up DNS")?;
-    channel
-        .StartExistingTransports(
+
+    // Start below only returns when the connection ends, so the session must exist before it.
+    let session = Arc::new(Session {
+        tunnel: Mutex::new(Tunnel::new(setup.interface, setup.peer, session_index())),
+        channel: channel.clone(),
+        _socket: socket.clone(),
+        stop: AtomicBool::new(false),
+    });
+    *lock(&SESSION) = Some(session.clone());
+    let timers = session.clone();
+    std::thread::spawn(move || run_timers(&timers));
+
+    log(channel, "connected");
+    let result = channel
+        .StartWithMainTransport(
             ipv4.as_ref(),
             ipv6.as_ref(),
             None::<&VpnInterfaceId>,
@@ -230,31 +255,15 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
             s.mtu,
             s.max_frame_size,
             false,
+            &socket,
         )
-        .context("starting the VPN interface")?;
+        .context("starting the VPN interface");
 
-    let mut tunnel = Tunnel::new(setup.interface, setup.peer, session_index());
-    let handshake = tunnel.handshake();
-    let session = Arc::new(Session {
-        tunnel: Mutex::new(tunnel),
-        channel: channel.clone(),
-        _socket: socket,
-        stop: AtomicBool::new(false),
-    });
-    if let Some(datagram) = handshake
-        && let Err(e) = session.send(&datagram)
-    {
-        log(
-            channel,
-            &format!("sending the first handshake failed, will retry: {e}"),
-        );
-    }
-
-    let timers = session.clone();
-    std::thread::spawn(move || run_timers(&timers));
-    *lock(&SESSION) = Some(session);
-    log(channel, "connected");
-    Ok(())
+    let disconnected = session.stop.load(Ordering::Relaxed);
+    stop_session();
+    log(channel, "connection ended");
+    // Once Windows asked us to disconnect, how Start ends doesn't matter.
+    if disconnected { Ok(()) } else { result }
 }
 
 fn local_state() -> std::result::Result<PathBuf, String> {
@@ -268,6 +277,20 @@ fn local_state() -> std::result::Result<PathBuf, String> {
 fn run_timers(session: &Session) {
     // SAFETY: called once at the start of a thread we own.
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+
+    // Start the handshake right away, so the tunnel is up before the first packet. If the
+    // channel isn't ready yet the send fails, and WireGuard's retry timer sends it again.
+    std::thread::sleep(TICK_INTERVAL);
+    let handshake = lock(&session.tunnel).handshake();
+    if let Some(datagram) = handshake
+        && let Err(e) = session.send(&datagram)
+    {
+        log(
+            &session.channel,
+            &format!("first handshake not sent, will retry: {e}"),
+        );
+    }
+
     while !session.stop.load(Ordering::Relaxed) {
         std::thread::sleep(TICK_INTERVAL);
         let datagram = lock(&session.tunnel).tick();
@@ -354,6 +377,41 @@ fn new_packet(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Resul
 
 fn log(channel: &VpnChannel, message: &str) {
     let _ = channel.LogDiagnosticMessage(&HSTRING::from(message));
+    file_log(message);
+}
+
+static TRACE_KEEPALIVE: AtomicBool = AtomicBool::new(false);
+static TRACE_ENCAP: AtomicBool = AtomicBool::new(false);
+static TRACE_DECAP: AtomicBool = AtomicBool::new(false);
+
+/// Logs the first call of a hot callback, to see which ones Windows makes.
+fn trace_once(flag: &AtomicBool, what: &str) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        file_log(&format!(
+            "trace: first {what} on {:?}",
+            std::thread::current().id()
+        ));
+    }
+}
+
+/// Appends to `plugin.log` in the package's data folder. Never log key material here.
+pub fn file_log(message: &str) {
+    use std::io::Write;
+    let Ok(dir) = local_state() else {
+        return;
+    };
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("plugin.log"))
+    {
+        let _ = writeln!(file, "{h:02}:{m:02}:{s:02} UTC {message}");
+    }
 }
 
 #[implement(IActivationFactory)]
