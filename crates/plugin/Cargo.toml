@@ -23,6 +23,9 @@ windows = { version = "0.62", features = [
     "Networking",
     "Networking_Sockets",
     "Networking_Vpn",
+    "Security_Cryptography_DataProtection",
+    "Storage",
+    "Storage_Search",
     "Storage_Streams",
     "Win32_System_WinRT",
 ] }

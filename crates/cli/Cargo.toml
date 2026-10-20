@@ -1,0 +1,13 @@
+[package]
+name = "wgw11-cli"
+version = "0.1.0"
+edition.workspace = true
+description = "Adds, removes and lists WireGuard tunnels as Windows VPN connections"
+
+[[bin]]
+name = "wgw11"
+path = "src/main.rs"
+
+[dependencies]
+wgconf = { path = "../wgconf" }
+wgw11-plugin = { path = "../plugin" }

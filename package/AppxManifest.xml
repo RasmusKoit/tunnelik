@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity Name="WireGuardW11" Publisher="CN=wireguard-w11" Version="0.1.0.0" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>WireGuard W11</DisplayName>
+    <PublisherDisplayName>Rasmus Koit</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!--
+      Hidden app whose only job is hosting the VPN plugin. Windows starts wgw11_host.exe and
+      creates the background task class in it for every VPN event (connect, packets, disconnect).
+      Windows has no dedicated VPN plugin extension; a "vpnClient" background task is what makes
+      the package show up as a VPN provider.
+    -->
+    <Application Id="Plugin" Executable="wgw11_host.exe">
+      <uap:VisualElements
+        DisplayName="WireGuard W11"
+        Description="WireGuard VPN plugin"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        BackgroundColor="transparent"
+        AppListEntry="none" />
+      <Extensions>
+        <Extension Category="windows.backgroundTasks" Executable="wgw11_host.exe" EntryPoint="WireGuardW11.VpnBackgroundTask">
+          <BackgroundTasks>
+            <uap:Task Type="vpnClient" />
+          </BackgroundTasks>
+        </Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="internetClientServer" />
+    <Capability Name="privateNetworkClientServer" />
+    <!-- Restricted: fine for sideloading, needs Microsoft's approval for the Store. -->
+    <rescap:Capability Name="networkingVpnProvider" />
+  </Capabilities>
+
+  <!-- Windows requires the background task class to be registered; the DLL exports its factory. -->
+  <Extensions>
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>wgw11_plugin.dll</Path>
+        <ActivatableClass ActivatableClassId="WireGuardW11.VpnBackgroundTask" ThreadingModel="both" />
+      </InProcessServer>
+    </Extension>
+  </Extensions>
+</Package>

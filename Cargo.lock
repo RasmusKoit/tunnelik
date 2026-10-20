@@ -565,6 +565,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgw11-cli"
+version = "0.1.0"
+dependencies = [
+ "wgconf",
+ "wgw11-plugin",
+]
+
+[[package]]
+name = "wgw11-host"
+version = "0.1.0"
+dependencies = [
+ "wgw11-plugin",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "wgw11-plugin"
 version = "0.1.0"
 dependencies = [

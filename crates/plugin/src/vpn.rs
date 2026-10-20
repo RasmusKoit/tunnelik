@@ -1,4 +1,4 @@
-//! Windows side of the plugin: the DLL entry points, the background task and `IVpnPlugIn`.
+//! Windows side of the plugin: the background task, `IVpnPlugIn` and the DLL entry points.
 //!
 //! Windows runs the background task for every VPN event and hands the event to
 //! `VpnChannel::ProcessEventAsync`, which calls back into `Plugin`. Windows reads datagrams from
@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,10 +22,9 @@ use windows::Networking::Vpn::{
     VpnDomainNameInfo, VpnDomainNameType, VpnInterfaceId, VpnPacketBuffer, VpnPacketBufferList,
     VpnRoute, VpnRouteAssignment,
 };
-use windows::Storage::Streams::Buffer;
+use windows::Storage::ApplicationData;
 use windows::Win32::System::WinRT::{
-    IActivationFactory, IActivationFactory_Impl, IBufferByteAccess, RO_INIT_MULTITHREADED,
-    RoInitialize,
+    IActivationFactory, IActivationFactory_Impl, RO_INIT_MULTITHREADED, RoInitialize,
 };
 use windows_collections::{IIterable, IVectorView};
 use windows_core::{
@@ -32,7 +32,8 @@ use windows_core::{
 };
 
 use crate::tunnel::Tunnel;
-use crate::{profile, settings};
+use crate::winrt::{Context, E_FAIL, read_buffer, write_buffer};
+use crate::{profile, settings, store};
 
 /// Class name the package manifest registers for the background task.
 pub const TASK_CLASS: &str = "WireGuardW11.VpnBackgroundTask";
@@ -41,8 +42,6 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 const S_OK: HRESULT = HRESULT(0);
 const S_FALSE: HRESULT = HRESULT(1);
-const E_FAIL: HRESULT = HRESULT(0x8000_4005_u32 as i32);
-const E_BOUNDS: HRESULT = HRESULT(0x8000_000B_u32 as i32);
 const CLASS_E_CLASSNOTAVAILABLE: HRESULT = HRESULT(0x8004_0111_u32 as i32);
 
 /// The connected tunnel. Windows may hand each event to a new plugin object, so state lives here.
@@ -50,17 +49,18 @@ static SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
 
 struct Session {
     tunnel: Mutex<Tunnel>,
-    socket: DatagramSocket,
+    channel: VpnChannel,
+    /// Owned by Windows once associated; kept so it lives as long as the session.
+    _socket: DatagramSocket,
     stop: AtomicBool,
 }
 
 impl Session {
-    /// Sends a datagram outside of Windows' packet flow, for handshakes and timers.
+    /// Sends a datagram outside of Windows' packet callbacks, for handshakes and timers.
     fn send(&self, datagram: &[u8]) -> Result<()> {
-        let buffer = Buffer::Create(datagram.len() as u32)?;
-        write_buffer(&buffer, datagram)?;
-        self.socket.OutputStream()?.WriteAsync(&buffer)?.join()?;
-        Ok(())
+        let packet = new_packet(&self.channel, VpnDataPathType::Send, datagram)?;
+        self.channel.AppendVpnSendPacketBuffer(&packet)?;
+        self.channel.FlushVpnSendPacketBuffers()
     }
 }
 
@@ -78,6 +78,11 @@ fn stop_session() {
     if let Some(session) = lock(&SESSION).take() {
         session.stop.store(true, Ordering::Relaxed);
     }
+}
+
+/// Factory for the background task class, for whichever process Windows loads us into.
+pub fn activation_factory(class: &HSTRING) -> Option<IActivationFactory> {
+    (*class == TASK_CLASS).then(|| Factory.into())
 }
 
 #[implement(IBackgroundTask)]
@@ -139,7 +144,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
                     encapsulated.Append(&packet)?;
                 }
                 Ok(Some(datagram)) => {
-                    encapsulated.Append(&new_buffer(channel, VpnDataPathType::Send, &datagram)?)?;
+                    encapsulated.Append(&new_packet(channel, VpnDataPathType::Send, &datagram)?)?;
                 }
                 Ok(None) => {}
                 Err(e) => log(channel, &format!("dropping outgoing packet: {e:?}")),
@@ -168,12 +173,12 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         for packet in &out.to_tunnel {
             decapsulated
                 .ok()?
-                .Append(&new_buffer(channel, VpnDataPathType::Receive, packet)?)?;
+                .Append(&new_packet(channel, VpnDataPathType::Receive, packet)?)?;
         }
         for reply in &out.to_network {
             control
                 .ok()?
-                .Append(&new_buffer(channel, VpnDataPathType::Send, reply)?)?;
+                .Append(&new_packet(channel, VpnDataPathType::Send, reply)?)?;
         }
         Ok(())
     }
@@ -188,10 +193,18 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         .Configuration()
         .and_then(|c| c.CustomField())
         .context("reading the VPN profile")?;
-    let text = profile::config_text(&custom.to_string())?;
+    let name = profile::tunnel_name(&custom.to_string())?;
+    let text = store::load(&local_state()?, &name)?;
     let config = wgconf::parse(&text).map_err(|e| format!("invalid WireGuard config: {e}"))?;
     let setup = settings::from_config(&config)?;
     let s = &setup.settings;
+    log(
+        channel,
+        &format!(
+            "connecting tunnel `{name}` to {}:{}",
+            s.endpoint.host, s.endpoint.port
+        ),
+    );
 
     // The socket must be associated before it connects, so Windows keeps it outside the tunnel.
     let socket = DatagramSocket::new().context("creating the UDP socket")?;
@@ -224,7 +237,8 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let handshake = tunnel.handshake();
     let session = Arc::new(Session {
         tunnel: Mutex::new(tunnel),
-        socket,
+        channel: channel.clone(),
+        _socket: socket,
         stop: AtomicBool::new(false),
     });
     if let Some(datagram) = handshake
@@ -239,7 +253,16 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let timers = session.clone();
     std::thread::spawn(move || run_timers(&timers));
     *lock(&SESSION) = Some(session);
+    log(channel, "connected");
     Ok(())
+}
+
+fn local_state() -> std::result::Result<PathBuf, String> {
+    ApplicationData::Current()
+        .and_then(|data| data.LocalFolder())
+        .and_then(|folder| folder.Path())
+        .map(|path| PathBuf::from(path.to_os_string()))
+        .context("finding the app's data folder")
 }
 
 fn run_timers(session: &Session) {
@@ -321,7 +344,7 @@ fn session_index() -> u32 {
     nanos & 0x00FF_FFFF
 }
 
-fn new_buffer(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Result<VpnPacketBuffer> {
+fn new_packet(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Result<VpnPacketBuffer> {
     let mut packet = None;
     channel.RequestVpnPacketBuffer(kind, &mut packet)?;
     let packet = packet.ok_or_else(|| Error::new(E_FAIL, "Windows has no free packet buffer"))?;
@@ -329,40 +352,8 @@ fn new_buffer(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Resul
     Ok(packet)
 }
 
-fn buffer_bytes(buffer: &Buffer) -> Result<*mut u8> {
-    // SAFETY: IBufferByteAccess is the documented way to reach an IBuffer's memory.
-    unsafe { buffer.cast::<IBufferByteAccess>()?.Buffer() }
-}
-
-fn read_buffer(buffer: &Buffer) -> Result<Vec<u8>> {
-    let len = buffer.Length()? as usize;
-    let ptr = buffer_bytes(buffer)?;
-    // SAFETY: the buffer holds `Length` initialized bytes at `ptr` while we hold a reference to it.
-    Ok(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
-}
-
-fn write_buffer(buffer: &Buffer, data: &[u8]) -> Result<()> {
-    if data.len() > buffer.Capacity()? as usize {
-        return Err(Error::new(E_BOUNDS, "packet does not fit in the buffer"));
-    }
-    let ptr = buffer_bytes(buffer)?;
-    // SAFETY: `ptr` points to at least `Capacity` writable bytes, checked above.
-    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()) };
-    buffer.SetLength(data.len() as u32)
-}
-
 fn log(channel: &VpnChannel, message: &str) {
     let _ = channel.LogDiagnosticMessage(&HSTRING::from(message));
-}
-
-trait Context<T> {
-    fn context(self, what: &str) -> std::result::Result<T, String>;
-}
-
-impl<T> Context<T> for Result<T> {
-    fn context(self, what: &str) -> std::result::Result<T, String> {
-        self.map_err(|e| format!("{what} failed: {}", e.message()))
-    }
 }
 
 #[implement(IActivationFactory)]
@@ -380,7 +371,7 @@ unsafe extern "system" fn DllGetActivationFactory(
     name: ManuallyDrop<HSTRING>,
     factory: *mut *mut c_void,
 ) -> HRESULT {
-    let result: Option<IActivationFactory> = (*name == TASK_CLASS).then(|| Factory.into());
+    let result = activation_factory(&name);
     // SAFETY: Windows passes a valid pointer to receive the factory.
     unsafe {
         match result {
