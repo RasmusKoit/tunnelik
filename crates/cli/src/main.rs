@@ -9,7 +9,8 @@ const USAGE: &str = "usage:
   tunnelik remove <name>            remove a tunnel
   tunnelik up <name>                connect (disconnects any other Tunnelik tunnel)
   tunnelik down <name>              disconnect
-  tunnelik list                     list tunnels and whether they are connected";
+  tunnelik list                     list tunnels and whether they are connected
+  tunnelik repair                   recreate missing VPN connections, e.g. after a reinstall";
 
 #[cfg(windows)]
 fn main() -> ExitCode {
@@ -36,6 +37,13 @@ fn main() -> ExitCode {
             }
             for t in tunnels {
                 println!("{:<24} {}", t.name, t.state.as_str());
+            }
+        }),
+        ["repair"] => manage::repair().map(|names| {
+            if names.is_empty() {
+                println!("Every tunnel has its VPN connection; nothing to repair.");
+            } else {
+                println!("Recreated the VPN connection for: {}", names.join(", "));
             }
         }),
         ["-h" | "--help" | "help"] => {

@@ -38,20 +38,50 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Mic
 winget install --id Rustlang.Rustup
 ```
 
-Turn on **Settings → System → For developers → Developer Mode**.
-
-## Try it
+## Build the installer
 
 ```
-.\scripts\install-dev.ps1
-.\target\release\tunnelik.exe add Home C:\path\to\home.conf
-.\target\release\tunnelik.exe up Home
+.\scripts\package.ps1
 ```
 
-Or connect **Home** from Settings → Network & internet → VPN. The plugin logs to
+This builds `target\Tunnelik-<version>-x64.msix`, signed with a self-signed certificate that
+`scripts\new-cert.ps1` creates on first use (its private key stays in your user certificate
+store). Windows installs the package once that certificate is trusted, which takes one command
+in an **admin** PowerShell:
+
+```
+Import-Certificate -FilePath target\Tunnelik.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+```
+
+Then double-click the `.msix`, or run `Add-AppxPackage target\Tunnelik-<version>-x64.msix`.
+Bump the version in `package\AppxManifest.xml` for each release so it installs as an update.
+
+## Use it
+
+Open **Tunnelik** from the Start menu, or from a terminal:
+
+```
+tunnelik add Home C:\path\to\home.conf
+tunnelik up Home
+tunnelik list
+```
+
+Or connect **Home** from Settings → Network & internet → VPN. Windows runs one connection per VPN
+plugin, so connecting a tunnel disconnects any other Tunnelik tunnel. The plugin logs to
 `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
 
+If Windows dropped the VPN connections (it does when the package is uninstalled and installed
+again), `tunnelik repair` recreates them from the saved configs; the app does this when it opens.
+
 Limitations for now: one `[Peer]` per tunnel.
+
+## Development install
+
+For quicker iterations, `.\scripts\install-dev.ps1` registers the build straight from
+`target\appx` without signing. It needs **Settings → System → For developers → Developer Mode**.
+A development install and the signed package can't replace each other: remove one with
+`Remove-AppxPackage -PreserveApplicationData` before installing the other, then run
+`tunnelik repair`.
 
 ## Test
 

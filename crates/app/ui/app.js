@@ -366,6 +366,11 @@ ui.toggle.onclick = () => {
   if (t) toggleTunnel(t);
 };
 
+// After a reinstall Windows may have dropped the VPN connections; bring them back quietly.
+invoke("repair_profiles")
+  .then((names) => { if (names.length) refresh(); })
+  .catch((e) => showError(String(e)));
+
 // Keep the status current, including changes made from Settings or the command line.
 refresh();
 setInterval(() => { if (!busy) refresh(); }, 3000);

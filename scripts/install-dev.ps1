@@ -27,11 +27,13 @@ Get-Process tunnelik_host, tunnelik-app -ErrorAction SilentlyContinue | Stop-Pro
 New-Item -ItemType Directory -Force $out | Out-Null
 
 # Re-registering the same version silently keeps the old registration, so every install gets a
-# newer one: 0.1.<days since 2026-01-01>.<minute of the day>.
+# newer one: 0.0.<days since 2026-01-01>.<minute of the day>. Releases (package.ps1) use the
+# manifest's version, which is always higher.
 $now = Get-Date
-$version = '0.1.{0}.{1}' -f [int][math]::Floor(($now - [datetime]'2026-01-01').TotalDays), ($now.Hour * 60 + $now.Minute)
-(Get-Content "$root\package\AppxManifest.xml" -Raw) -replace 'Version="0\.1\.0\.0"', "Version=`"$version`"" |
-    Set-Content -Encoding UTF8 "$out\AppxManifest.xml"
+$version = '0.0.{0}.{1}' -f [int][math]::Floor(($now - [datetime]'2026-01-01').TotalDays), ($now.Hour * 60 + $now.Minute)
+[xml]$manifest = Get-Content "$root\package\AppxManifest.xml"
+$manifest.Package.Identity.Version = $version
+$manifest.Save("$out\AppxManifest.xml")
 Copy-Item -Recurse -Force "$root\package\Assets" $out
 foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe') {
     Copy-Item -Force "$root\target\$profileName\$file" $out

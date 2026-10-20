@@ -112,6 +112,12 @@ mod commands {
         blocking(move || manage::disconnect(&name)).await
     }
 
+    /// Recreates VPN connections Windows dropped, e.g. when the package was reinstalled.
+    #[tauri::command]
+    pub async fn repair_profiles() -> Result<Vec<String>, String> {
+        blocking(manage::repair).await
+    }
+
     /// Opens a web link in the default browser instead of inside the app's window.
     #[tauri::command]
     pub fn open_link(url: String) -> Result<(), String> {
@@ -146,6 +152,7 @@ fn main() {
             connect,
             disconnect,
             open_link,
+            repair_profiles,
             validate
         ])
         .run(tauri::generate_context!())

@@ -61,6 +61,27 @@ pub fn read(name: &str) -> Result<String, String> {
     store::load(&local_state()?, name)
 }
 
+/// Recreates missing VPN connections for saved tunnels, and returns their names. Windows deletes
+/// a VPN plugin's connections when the plugin's package is uninstalled (say, when moving from a
+/// development install to the signed package), while the encrypted configs survive.
+pub fn repair() -> Result<Vec<String>, String> {
+    let family = package_family()?;
+    let existing = powershell(
+        "(Get-VpnConnection | Where-Object PlugInApplicationID -eq $env:TUNNELIK_FAMILY).Name",
+        &[("TUNNELIK_FAMILY", &family)],
+    )?;
+    let existing: Vec<&str> = existing.lines().map(str::trim).collect();
+
+    let mut repaired = Vec::new();
+    for name in store::list(&local_state()?) {
+        if !existing.iter().any(|e| e.eq_ignore_ascii_case(&name)) {
+            save(&name, &read(&name)?)?;
+            repaired.push(name);
+        }
+    }
+    Ok(repaired)
+}
+
 /// A tunnel's settings without its secrets: safe to show while browsing tunnels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Details {
