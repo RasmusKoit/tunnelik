@@ -90,6 +90,32 @@ main {
 .empty { margin: auto; max-width: 440px; text-align: center; color: var(--muted); }
 .empty h2 { color: var(--text); font-weight: 600; font-size: 18px; }
 
+.details { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow: auto; }
+.peers { display: flex; flex-direction: column; gap: 12px; }
+.details-foot { display: flex; align-items: center; gap: 10px; }
+
+.card {
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.card-title { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.card-actions { margin-top: 12px; padding-left: 132px; }
+
+.fields {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+.fields dt { color: var(--muted); text-align: right; }
+.fields dd { margin: 0; overflow-wrap: anywhere; }
+.fields .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+.status { display: inline-flex; align-items: center; gap: 8px; }
+.status .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+.status .dot.on { background: var(--ok); }
+
 .editor { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
 .editor-head, .editor-foot { display: flex; align-items: center; gap: 10px; }
 .spacer { flex: 1; }

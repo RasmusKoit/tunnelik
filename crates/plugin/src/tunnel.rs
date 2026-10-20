@@ -13,6 +13,11 @@ pub struct Tunnel {
     buf: Vec<u8>,
 }
 
+/// The public key belonging to a private key, which is what peers know this tunnel by.
+pub fn public_key(private: &wgconf::Key) -> wgconf::Key {
+    wgconf::Key(PublicKey::from(&StaticSecret::from(private.0)).to_bytes())
+}
+
 /// Output of feeding one datagram from the peer into the tunnel.
 #[derive(Debug, Default)]
 pub struct Decapsulated {
@@ -208,6 +213,13 @@ mod tests {
         let packet = ipv4_packet(b"x");
         let datagram = client.encapsulate(&packet).unwrap().unwrap();
         assert_eq!(server.decapsulate(&datagram).to_tunnel, vec![packet]);
+    }
+
+    #[test]
+    fn public_key_matches_handshake_identity() {
+        // `peer([1; 32])` is how the other side sees the client with private key [1; 32].
+        assert_eq!(public_key(&Key([1; 32])), peer([1; 32]).public_key);
+        assert_ne!(public_key(&Key([1; 32])), public_key(&Key([2; 32])));
     }
 
     #[test]

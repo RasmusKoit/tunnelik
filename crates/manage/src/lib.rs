@@ -43,6 +43,61 @@ pub fn read(name: &str) -> Result<String, String> {
     store::load(&local_state()?, name)
 }
 
+/// A tunnel's settings without its secrets: safe to show while browsing tunnels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Details {
+    pub public_key: String,
+    pub listen_port: Option<u16>,
+    pub addresses: Vec<String>,
+    pub dns: Vec<String>,
+    pub mtu: Option<u16>,
+    pub peers: Vec<PeerDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDetails {
+    pub public_key: String,
+    pub has_preshared_key: bool,
+    pub allowed_ips: Vec<String>,
+    pub endpoint: Option<String>,
+    pub persistent_keepalive: Option<u16>,
+}
+
+pub fn details(name: &str) -> Result<Details, String> {
+    let config = wgconf::parse(&read(name)?).map_err(|e| e.to_string())?;
+    let iface = &config.interface;
+    let strings = |items: &[wgconf::IpNet]| items.iter().map(ToString::to_string).collect();
+    Ok(Details {
+        public_key: tunnelik_plugin::tunnel::public_key(&iface.private_key).to_base64(),
+        listen_port: iface.listen_port,
+        addresses: strings(&iface.addresses),
+        dns: iface
+            .dns_servers
+            .iter()
+            .map(ToString::to_string)
+            .chain(iface.dns_search.iter().cloned())
+            .collect(),
+        mtu: iface.mtu,
+        peers: config
+            .peers
+            .iter()
+            .map(|p| PeerDetails {
+                public_key: p.public_key.to_base64(),
+                has_preshared_key: p.preshared_key.is_some(),
+                allowed_ips: strings(&p.allowed_ips),
+                endpoint: p.endpoint.as_ref().map(|e| {
+                    if e.host.contains(':') {
+                        format!("[{}]:{}", e.host, e.port)
+                    } else {
+                        format!("{}:{}", e.host, e.port)
+                    }
+                }),
+                persistent_keepalive: p.persistent_keepalive,
+            })
+            .collect(),
+    })
+}
+
 /// Adds a tunnel or replaces its config. A connected tunnel picks up the change on its next
 /// connect.
 pub fn save(name: &str, config_text: &str) -> Result<(), String> {

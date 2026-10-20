@@ -24,11 +24,27 @@
          or with <code>tunnelik up &lt;name&gt;</code>.</p>
     </section>
 
+    <!-- Overview of a saved tunnel. Built from tunnel_details, which never includes secrets. -->
+    <section id="details" class="details" hidden>
+      <div class="card">
+        <h2 class="card-title">Interface: <span id="d-name"></span></h2>
+        <dl id="d-interface" class="fields"></dl>
+        <div class="card-actions">
+          <button id="toggle" class="button primary"></button>
+        </div>
+      </div>
+      <div id="d-peers" class="peers"></div>
+      <div class="details-foot">
+        <span class="spacer"></span>
+        <button id="delete" class="button danger">Delete</button>
+        <button id="edit" class="button">Edit</button>
+      </div>
+    </section>
+
+    <!-- Full config, private key included: only shown when adding or editing a tunnel. -->
     <section id="editor" class="editor" hidden>
       <div class="editor-head">
         <input id="name" class="name" placeholder="Tunnel name" spellcheck="false" autocomplete="off">
-        <span id="state" class="state"></span>
-        <button id="toggle" class="button primary"></button>
       </div>
       <textarea id="config" class="config" spellcheck="false"
         placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.0.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …&#10;AllowedIPs = 10.0.0.0/8&#10;Endpoint = vpn.example.com:51820"></textarea>
@@ -36,7 +52,7 @@
       <div class="editor-foot">
         <label class="button">Import .conf<input id="import" type="file" accept=".conf,text/plain" hidden></label>
         <span class="spacer"></span>
-        <button id="delete" class="button danger">Delete</button>
+        <button id="cancel" class="button">Cancel</button>
         <button id="save" class="button primary">Save</button>
       </div>
     </section>

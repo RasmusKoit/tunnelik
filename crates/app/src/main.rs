@@ -37,9 +37,58 @@ mod commands {
         .await
     }
 
+    /// The full config, private key included. Only called when the user opens the editor.
     #[tauri::command]
     pub async fn read_tunnel(name: String) -> Result<String, String> {
         blocking(move || manage::read(&name)).await
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Details {
+        public_key: String,
+        listen_port: Option<u16>,
+        addresses: Vec<String>,
+        dns: Vec<String>,
+        mtu: Option<u16>,
+        peers: Vec<Peer>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Peer {
+        public_key: String,
+        has_preshared_key: bool,
+        allowed_ips: Vec<String>,
+        endpoint: Option<String>,
+        persistent_keepalive: Option<u16>,
+    }
+
+    /// What the overview shows: no private or preshared keys ever leave Rust here.
+    #[tauri::command]
+    pub async fn tunnel_details(name: String) -> Result<Details, String> {
+        blocking(move || {
+            let d = manage::details(&name)?;
+            Ok(Details {
+                public_key: d.public_key,
+                listen_port: d.listen_port,
+                addresses: d.addresses,
+                dns: d.dns,
+                mtu: d.mtu,
+                peers: d
+                    .peers
+                    .into_iter()
+                    .map(|p| Peer {
+                        public_key: p.public_key,
+                        has_preshared_key: p.has_preshared_key,
+                        allowed_ips: p.allowed_ips,
+                        endpoint: p.endpoint,
+                        persistent_keepalive: p.persistent_keepalive,
+                    })
+                    .collect(),
+            })
+        })
+        .await
     }
 
     #[tauri::command]
@@ -62,6 +111,20 @@ mod commands {
         blocking(move || manage::disconnect(&name)).await
     }
 
+    /// Opens a web link in the default browser instead of inside the app's window.
+    #[tauri::command]
+    pub fn open_link(url: String) -> Result<(), String> {
+        // Only plain web links: anything else could start arbitrary programs.
+        if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c == '"') {
+            return Err(format!("not opening `{url}`"));
+        }
+        std::process::Command::new("explorer.exe")
+            .arg(&url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("opening {url}: {e}"))
+    }
+
     /// Checks a config while it is being edited; fast, so it runs inline.
     #[tauri::command]
     pub fn validate(config: String) -> Result<(), String> {
@@ -76,10 +139,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_tunnels,
             read_tunnel,
+            tunnel_details,
             save_tunnel,
             remove_tunnel,
             connect,
             disconnect,
+            open_link,
             validate
         ])
         .run(tauri::generate_context!())
