@@ -19,7 +19,7 @@ The official WireGuard app is not used.
 | Path            | What                                    | Status  |
 |-----------------|-----------------------------------------|---------|
 | `crates/wgconf` | Parser for WireGuard `.conf` files      | Done    |
-| `crates/plugin` | VPN plugin background task              | Planned |
+| `crates/plugin` | VPN plugin DLL (background task)        | Builds, not yet run in Windows |
 | `app`           | Tauri config editor                     | Planned |
 
 ## Prerequisites

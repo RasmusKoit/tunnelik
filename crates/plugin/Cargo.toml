@@ -1,0 +1,28 @@
+[package]
+name = "wgw11-plugin"
+version = "0.1.0"
+edition.workspace = true
+description = "Windows VPN plugin that carries WireGuard tunnels"
+
+[lib]
+name = "wgw11_plugin"
+# cdylib is what Windows loads; rlib lets the tests link against the crate.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wgconf = { path = "../wgconf" }
+boringtun = { version = "0.7", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.62"
+windows-collections = "0.3"
+windows-future = "0.3"
+windows = { version = "0.62", features = [
+    "ApplicationModel_Background",
+    "Foundation_Collections",
+    "Networking",
+    "Networking_Sockets",
+    "Networking_Vpn",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }

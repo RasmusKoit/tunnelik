@@ -93,7 +93,10 @@ impl FromStr for Endpoint {
             return Err(());
         }
         let port = port.parse().map_err(|_| ())?;
-        Ok(Endpoint { host: host.to_string(), port })
+        Ok(Endpoint {
+            host: host.to_string(),
+            port,
+        })
     }
 }
 
@@ -131,11 +134,17 @@ pub struct ParseError {
 
 impl ParseError {
     fn at(line: usize, message: impl Into<String>) -> Self {
-        ParseError { line: Some(line), message: message.into() }
+        ParseError {
+            line: Some(line),
+            message: message.into(),
+        }
     }
 
     fn general(message: impl Into<String>) -> Self {
-        ParseError { line: None, message: message.into() }
+        ParseError {
+            line: None,
+            message: message.into(),
+        }
     }
 }
 
@@ -215,7 +224,12 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                     });
                     section = Section::Peer;
                 }
-                _ => return Err(ParseError::at(line, format!("unknown section [{}]", name.trim()))),
+                _ => {
+                    return Err(ParseError::at(
+                        line,
+                        format!("unknown section [{}]", name.trim()),
+                    ));
+                }
             }
             continue;
         }
@@ -233,8 +247,15 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
             Section::Interface => {
                 let iface = interface.as_mut().expect("in Interface section");
                 match key.to_ascii_lowercase().as_str() {
-                    "privatekey" => set_once(&mut iface.private_key, parse_key(value, line)?, key, line)?,
-                    "listenport" => set_once(&mut iface.listen_port, parse_num(value, key, line)?, key, line)?,
+                    "privatekey" => {
+                        set_once(&mut iface.private_key, parse_key(value, line)?, key, line)?
+                    }
+                    "listenport" => set_once(
+                        &mut iface.listen_port,
+                        parse_num(value, key, line)?,
+                        key,
+                        line,
+                    )?,
                     "mtu" => set_once(&mut iface.mtu, parse_num(value, key, line)?, key, line)?,
                     "address" => {
                         for item in list(value) {
@@ -250,22 +271,38 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                             }
                         }
                     }
-                    _ => return Err(ParseError::at(line, format!("unknown [Interface] setting `{key}`"))),
+                    _ => {
+                        return Err(ParseError::at(
+                            line,
+                            format!("unknown [Interface] setting `{key}`"),
+                        ));
+                    }
                 }
             }
             Section::Peer => {
                 let peer = peers.last_mut().expect("in Peer section");
                 match key.to_ascii_lowercase().as_str() {
-                    "publickey" => set_once(&mut peer.public_key, parse_key(value, line)?, key, line)?,
-                    "presharedkey" => set_once(&mut peer.preshared_key, parse_key(value, line)?, key, line)?,
+                    "publickey" => {
+                        set_once(&mut peer.public_key, parse_key(value, line)?, key, line)?
+                    }
+                    "presharedkey" => {
+                        set_once(&mut peer.preshared_key, parse_key(value, line)?, key, line)?
+                    }
                     "endpoint" => {
-                        let endpoint = value
-                            .parse()
-                            .map_err(|_| ParseError::at(line, format!("invalid endpoint `{value}`, expected host:port")))?;
+                        let endpoint = value.parse().map_err(|_| {
+                            ParseError::at(
+                                line,
+                                format!("invalid endpoint `{value}`, expected host:port"),
+                            )
+                        })?;
                         set_once(&mut peer.endpoint, endpoint, key, line)?;
                     }
                     "persistentkeepalive" => {
-                        let interval = if value.eq_ignore_ascii_case("off") { 0 } else { parse_num(value, key, line)? };
+                        let interval = if value.eq_ignore_ascii_case("off") {
+                            0
+                        } else {
+                            parse_num(value, key, line)?
+                        };
                         set_once(&mut peer.persistent_keepalive, interval, key, line)?;
                     }
                     "allowedips" => {
@@ -273,7 +310,12 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                             peer.allowed_ips.push(parse_net(item, line)?);
                         }
                     }
-                    _ => return Err(ParseError::at(line, format!("unknown [Peer] setting `{key}`"))),
+                    _ => {
+                        return Err(ParseError::at(
+                            line,
+                            format!("unknown [Peer] setting `{key}`"),
+                        ));
+                    }
                 }
             }
         }
@@ -332,7 +374,8 @@ fn set_once<T>(slot: &mut Option<T>, value: T, key: &str, line: usize) -> Result
 }
 
 fn parse_key(value: &str, line: usize) -> Result<Key, ParseError> {
-    Key::from_base64(value).ok_or_else(|| ParseError::at(line, "invalid key, expected 32 bytes of base64"))
+    Key::from_base64(value)
+        .ok_or_else(|| ParseError::at(line, "invalid key, expected 32 bytes of base64"))
 }
 
 fn parse_num<T: FromStr>(value: &str, key: &str, line: usize) -> Result<T, ParseError> {
@@ -385,7 +428,10 @@ Endpoint = 203.0.113.10:13232
         assert_eq!(iface.private_key, key(1));
         assert_eq!(iface.listen_port, Some(51820));
         assert_eq!(iface.addresses, vec!["10.1.254.3/32".parse().unwrap()]);
-        assert_eq!(iface.dns_servers, vec![IpAddr::V4(Ipv4Addr::new(10, 1, 254, 1))]);
+        assert_eq!(
+            iface.dns_servers,
+            vec![IpAddr::V4(Ipv4Addr::new(10, 1, 254, 1))]
+        );
         assert!(iface.dns_search.is_empty());
 
         assert_eq!(config.peers.len(), 1);
@@ -393,21 +439,35 @@ Endpoint = 203.0.113.10:13232
         assert_eq!(peer.public_key, key(2));
         assert_eq!(
             peer.allowed_ips,
-            vec![IpNet::from_str("10.0.0.0/8").unwrap(), IpNet::from_str("192.168.11.0/24").unwrap()]
+            vec![
+                IpNet::from_str("10.0.0.0/8").unwrap(),
+                IpNet::from_str("192.168.11.0/24").unwrap()
+            ]
         );
-        assert_eq!(peer.endpoint, Some(Endpoint { host: "203.0.113.10".into(), port: 13232 }));
+        assert_eq!(
+            peer.endpoint,
+            Some(Endpoint {
+                host: "203.0.113.10".into(),
+                port: 13232
+            })
+        );
         assert_eq!(peer.persistent_keepalive, None);
     }
 
     #[test]
     fn ignores_comments_and_case() {
-        let text = sample().replace("[Interface]", "# my tunnel\n[interface]  # comment").replace("DNS", "dns");
+        let text = sample()
+            .replace("[Interface]", "# my tunnel\n[interface]  # comment")
+            .replace("DNS", "dns");
         assert!(parse(&text).is_ok());
     }
 
     #[test]
     fn dns_search_domains() {
-        let text = sample().replace("DNS = 10.1.254.1", "DNS = 10.1.254.1, corp.example, 2001:db8::53");
+        let text = sample().replace(
+            "DNS = 10.1.254.1",
+            "DNS = 10.1.254.1, corp.example, 2001:db8::53",
+        );
         let iface = parse(&text).unwrap().interface;
         assert_eq!(
             iface.dns_servers,
@@ -423,11 +483,17 @@ Endpoint = 203.0.113.10:13232
     fn endpoints() {
         assert_eq!(
             "[2001:db8::1]:51820".parse::<Endpoint>(),
-            Ok(Endpoint { host: "2001:db8::1".into(), port: 51820 })
+            Ok(Endpoint {
+                host: "2001:db8::1".into(),
+                port: 51820
+            })
         );
         assert_eq!(
             "vpn.example.com:443".parse::<Endpoint>(),
-            Ok(Endpoint { host: "vpn.example.com".into(), port: 443 })
+            Ok(Endpoint {
+                host: "vpn.example.com".into(),
+                port: 443
+            })
         );
         assert!("2001:db8::1:51820".parse::<Endpoint>().is_err());
         assert!("vpn.example.com".parse::<Endpoint>().is_err());
@@ -437,7 +503,13 @@ Endpoint = 203.0.113.10:13232
 
     #[test]
     fn ip_nets() {
-        assert_eq!(IpNet::from_str("10.0.0.1"), Ok(IpNet { addr: "10.0.0.1".parse().unwrap(), prefix: 32 }));
+        assert_eq!(
+            IpNet::from_str("10.0.0.1"),
+            Ok(IpNet {
+                addr: "10.0.0.1".parse().unwrap(),
+                prefix: 32
+            })
+        );
         assert_eq!(IpNet::from_str("::/0").map(|n| n.prefix), Ok(0));
         assert!(IpNet::from_str("10.0.0.0/33").is_err());
         assert!(IpNet::from_str("10.0.0/8").is_err());
@@ -446,7 +518,8 @@ Endpoint = 203.0.113.10:13232
     #[test]
     fn persistent_keepalive() {
         let with = |v: &str| {
-            let text = sample().replace("Endpoint", &format!("PersistentKeepalive = {v}\nEndpoint"));
+            let text =
+                sample().replace("Endpoint", &format!("PersistentKeepalive = {v}\nEndpoint"));
             parse(&text).unwrap().peers[0].persistent_keepalive
         };
         assert_eq!(with("25"), Some(25));
@@ -480,12 +553,21 @@ Endpoint = 203.0.113.10:13232
     #[test]
     fn rejects_unknown_and_duplicate_settings() {
         let unknown = sample().replace("ListenPort", "ListenPrt");
-        assert!(err(&unknown).message.contains("unknown [Interface] setting"));
+        assert!(
+            err(&unknown)
+                .message
+                .contains("unknown [Interface] setting")
+        );
 
-        let duplicate = sample().replace("ListenPort = 51820", "ListenPort = 51820\nListenPort = 1");
+        let duplicate =
+            sample().replace("ListenPort = 51820", "ListenPort = 51820\nListenPort = 1");
         assert!(err(&duplicate).message.contains("duplicate"));
 
-        assert!(err("PrivateKey = x").message.contains("outside of a section"));
+        assert!(
+            err("PrivateKey = x")
+                .message
+                .contains("outside of a section")
+        );
         assert!(err("[Wat]").message.contains("unknown section"));
     }
 
