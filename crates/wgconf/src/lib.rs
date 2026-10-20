@@ -96,6 +96,15 @@ pub struct Endpoint {
     pub port: u16,
 }
 
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.host.contains(':') {
+            true => write!(f, "[{}]:{}", self.host, self.port),
+            false => write!(f, "{}:{}", self.host, self.port),
+        }
+    }
+}
+
 impl FromStr for Endpoint {
     type Err = ();
 
@@ -522,6 +531,17 @@ Endpoint = 203.0.113.10:13232
             ]
         );
         assert_eq!(iface.dns_search, vec!["corp.example".to_string()]);
+    }
+
+    #[test]
+    fn endpoints_round_trip() {
+        for text in [
+            "[2001:db8::1]:51820",
+            "vpn.example.com:443",
+            "203.0.113.10:13232",
+        ] {
+            assert_eq!(text.parse::<Endpoint>().unwrap().to_string(), text);
+        }
     }
 
     #[test]

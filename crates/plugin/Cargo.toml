@@ -25,6 +25,7 @@ windows = { version = "0.62", features = [
     "ApplicationModel_Background",
     "Foundation_Collections",
     "Networking",
+    "Networking_Connectivity",
     "Networking_Sockets",
     "Networking_Vpn",
     "Security_Cryptography_DataProtection",

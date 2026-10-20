@@ -11,10 +11,15 @@ WireGuard project. See [Trademarks](#trademarks).
 
 - **VPN plugin** (Rust, `windows` crate): implements Windows' `IVpnPlugIn`. Windows calls it on
   Connect/Disconnect and hands it the tunnel's packets through `VpnChannel`. The WireGuard
-  protocol itself comes from [BoringTun](https://github.com/cloudflare/boringtun).
+  protocol itself comes from [BoringTun](https://github.com/cloudflare/boringtun). When the
+  machine switches networks, the plugin notices within a second or two and has Windows
+  reconnect the tunnel, which takes about five seconds. Pings and new connections carry on;
+  connections that were open through the tunnel (SSH, rsync, downloads) are cut, since Windows
+  recreates the VPN interface.
 - **Tunnel storage**: each config is encrypted with DPAPI for your Windows user and saved in the
   package's data folder. The VPN profile only holds the tunnel's name.
-- **`tunnelik` command**: adds, removes, connects and lists tunnels; a Tauri app is in progress.
+- **`tunnelik` command and window**: the command adds, removes, connects and lists tunnels; the
+  window (a Tauri app) does the same with an overview of each tunnel and live transfer stats.
 - **Packaging**: an MSIX package whose hidden "Plugin" app hosts the plugin. During development
   it is registered straight from a folder, which needs Developer Mode but no signing.
 

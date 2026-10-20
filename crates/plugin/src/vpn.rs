@@ -8,20 +8,23 @@
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::ApplicationModel::Background::{
     IBackgroundTask, IBackgroundTask_Impl, IBackgroundTaskInstance,
 };
-use windows::Networking::HostName;
+use windows::Networking::Connectivity::{
+    NetworkConnectivityLevel, NetworkInformation, NetworkStatusChangedEventHandler,
+};
 use windows::Networking::Sockets::DatagramSocket;
 use windows::Networking::Vpn::{
     IVpnPlugIn, IVpnPlugIn_Impl, VpnChannel, VpnDataPathType, VpnDomainNameAssignment,
     VpnDomainNameInfo, VpnDomainNameType, VpnInterfaceId, VpnPacketBuffer, VpnPacketBufferList,
     VpnRoute, VpnRouteAssignment,
 };
+use windows::Networking::{HostName, HostNameType};
 use windows::Storage::ApplicationData;
 use windows::Win32::System::Com::IAgileObject;
 use windows::Win32::System::WinRT::{
@@ -37,12 +40,23 @@ use windows::Foundation::{IReference, PropertyValue};
 use crate::tunnel::Tunnel;
 use crate::winrt::{Context, E_FAIL, host_names, read_buffer, write_buffer};
 use crate::{live, profile, settings, store};
+use wgconf::Endpoint;
 
 /// Class name the package manifest registers for the background task.
 pub const TASK_CLASS: &str = "Tunnelik.VpnBackgroundTask";
 
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
+/// Handshake attempts unanswered for this long mean the connection to the peer is gone.
+const DEAD_AFTER: Duration = Duration::from_secs(10);
+/// Network changes this soon after connecting are our own interface coming up.
+const SETTLE: Duration = Duration::from_secs(5);
+/// Exit code of the host when it gives up a stranded connection for Windows to make a new one.
+const EXIT_RECONNECT: i32 = 3;
+/// How long a connect waits for a network that is still coming up.
+const NETWORK_WAIT: Duration = Duration::from_secs(20);
+/// First byte of a WireGuard handshake initiation message.
+const HANDSHAKE_INITIATION: u8 = 1;
 
 const S_OK: HRESULT = HRESULT(0);
 const S_FALSE: HRESULT = HRESULT(1);
@@ -58,8 +72,16 @@ struct Session {
     /// One UDP connection per peer. Owned by Windows once associated; kept so they live as long
     /// as the session.
     _sockets: Vec<DatagramSocket>,
-    /// With several peers, the transport context that tags each peer's connection, by peer
-    /// index. Empty for a single peer, which uses the channel's one main transport.
+    /// Where each peer's connection goes, for the log.
+    endpoints: Vec<Endpoint>,
+    /// The local IP address each peer's connection goes out from. Once that address is gone,
+    /// so is the connection.
+    local_addresses: Vec<String>,
+    /// Set by Windows' network status event; the timer thread checks the connections.
+    network_changed: AtomicBool,
+    /// Registration of that event, removed with the session.
+    network_token: AtomicI64,
+    /// The transport context that tags each peer's connection, by peer index.
     contexts: Vec<AgileContext>,
     /// Set once Start returned. Sending through the channel before that deadlocks.
     started: AtomicBool,
@@ -175,15 +197,18 @@ impl Session {
 
     /// Which peer an incoming datagram came from, by the connection it arrived on.
     fn peer_of(&self, datagram: &VpnPacketBuffer) -> Option<usize> {
-        if self.contexts.is_empty() {
-            return Some(0);
-        }
-        let context = datagram
+        let index = datagram
             .TransportContext()
             .or_else(|_| self.channel.CurrentRequestTransportContext())
-            .ok()?;
-        let index = context.cast::<IReference<u32>>().ok()?.Value().ok()?;
-        Some(index as usize)
+            .ok()
+            .and_then(|context| context.cast::<IReference<u32>>().ok())
+            .and_then(|index| index.Value().ok());
+        match index {
+            Some(index) => Some(index as usize),
+            // A single connection leaves no doubt.
+            None if self.contexts.len() == 1 => Some(0),
+            None => None,
+        }
     }
 
     /// Writes the live status the app shows; see `live`.
@@ -282,6 +307,10 @@ fn current_session() -> Option<Arc<Session>> {
 fn stop_session() {
     if let Some(session) = lock(&SESSION).take() {
         session.stop.store(true, Ordering::Relaxed);
+        let token = session.network_token.swap(0, Ordering::Relaxed);
+        if token != 0 {
+            let _ = NetworkInformation::RemoveNetworkStatusChanged(token);
+        }
         if let Ok(dir) = local_state() {
             let _ = std::fs::remove_file(dir.join(live::FILE));
         }
@@ -488,35 +517,25 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let config = wgconf::parse(&text).map_err(|e| format!("invalid WireGuard config: {e}"))?;
     let setup = settings::from_config(&config)?;
     let s = &setup.settings;
-    let servers: Vec<String> = s
-        .endpoints
-        .iter()
-        .map(|e| format!("{}:{}", e.host, e.port))
-        .collect();
+    let servers: Vec<String> = s.endpoints.iter().map(ToString::to_string).collect();
     log(
         channel,
         &format!("connecting tunnel `{name}` to {}", servers.join(", ")),
     );
 
+    wait_for_network(channel, &s.endpoints[0]);
+
     // Each socket must be associated before it connects, so Windows keeps it outside the
-    // tunnel. A single peer uses the channel's main transport, the path Windows' own samples
-    // use; several peers each get an extra transport, tagged with the peer's index.
-    let multi = s.endpoints.len() > 1;
+    // tunnel. Every peer gets its own transport, tagged with the peer's index.
     let mut sockets = Vec::new();
     let mut contexts = Vec::new();
     for (i, endpoint) in s.endpoints.iter().enumerate() {
         let socket = DatagramSocket::new().context("creating the UDP socket")?;
-        if multi {
-            let context = AgileContext::new(i as u32).context("tagging a connection")?;
-            channel
-                .AddAndAssociateTransport(&socket, &context.0)
-                .context("associating a UDP socket")?;
-            contexts.push(context);
-        } else {
-            channel
-                .AssociateTransport(&socket, None::<&IInspectable>)
-                .context("associating the UDP socket")?;
-        }
+        let context = AgileContext::new(i as u32).context("tagging a connection")?;
+        channel
+            .AddAndAssociateTransport(&socket, &context.0)
+            .context("associating a UDP socket")?;
+        contexts.push(context);
         host(&endpoint.host)
             .and_then(|peer| socket.ConnectAsync(&peer, &HSTRING::from(endpoint.port.to_string())))
             .and_then(|op| op.join())
@@ -530,21 +549,24 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let dns = dns(s).context("setting up DNS")?;
 
     // Windows may hand us packets as soon as the channel starts, so the session exists first.
-    let main = sockets[0].clone();
     let session = Arc::new(Session {
         name,
         tunnel: Mutex::new(Tunnel::new(setup.interface, setup.peers, session_index())),
         channel: channel.clone(),
+        local_addresses: sockets.iter().map(local_address).collect(),
         _sockets: sockets,
+        endpoints: s.endpoints.clone(),
         contexts,
         started: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        network_changed: AtomicBool::new(false),
+        network_token: AtomicI64::new(0),
         stats: Stats::default(),
     });
     *lock(&SESSION) = Some(session.clone());
 
-    let started = if multi {
-        channel.StartExistingTransports(
+    let started = channel
+        .StartExistingTransports(
             ipv4.as_ref(),
             ipv6.as_ref(),
             None::<&VpnInterfaceId>,
@@ -554,26 +576,29 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
             s.max_frame_size,
             false,
         )
-    } else {
-        channel.StartWithMainTransport(
-            ipv4.as_ref(),
-            ipv6.as_ref(),
-            None::<&VpnInterfaceId>,
-            &routes,
-            &dns,
-            s.mtu,
-            s.max_frame_size,
-            false,
-            &main,
-        )
-    }
-    .context("starting the VPN interface");
+        .context("starting the VPN interface");
     if let Err(e) = started {
         stop_session();
         return Err(e);
     }
     session.started.store(true, Ordering::Relaxed);
     log(channel, "connected");
+
+    // Switching networks (Wi-Fi to Ethernet, another hotspot) silently strands the sockets on
+    // the old network. Windows keeps showing the VPN as connected, so we watch for it.
+    let handler = NetworkStatusChangedEventHandler::new(|_| {
+        if let Some(session) = current_session() {
+            session.network_changed.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    });
+    match NetworkInformation::NetworkStatusChanged(&handler) {
+        Ok(token) => session.network_token.store(token, Ordering::Relaxed),
+        Err(e) => log(
+            channel,
+            &format!("not watching for network changes: {}", e.message()),
+        ),
+    }
 
     // Handshake right away, so each peer is up before the first packet needs it.
     for (peer, server) in servers.iter().enumerate() {
@@ -593,6 +618,39 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Right after a network change, Windows starts the plugin again before the new network has
+/// its addresses and routes, and a connect in that window fails with "no such host". Waits,
+/// within reason, until a throwaway socket can reach the server; the real sockets follow.
+fn wait_for_network(channel: &VpnChannel, endpoint: &Endpoint) {
+    let started = Instant::now();
+    let mut logged = false;
+    loop {
+        let probe = DatagramSocket::new().and_then(|socket| {
+            socket
+                .ConnectAsync(
+                    &host(&endpoint.host)?,
+                    &HSTRING::from(endpoint.port.to_string()),
+                )?
+                .join()
+        });
+        match probe {
+            Ok(()) => return,
+            // The real connect reports the error.
+            Err(_) if started.elapsed() >= NETWORK_WAIT => return,
+            Err(e) => {
+                if !logged {
+                    log(
+                        channel,
+                        &format!("waiting for the network: {}", e.message()),
+                    );
+                    logged = true;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
 fn local_state() -> std::result::Result<PathBuf, String> {
     ApplicationData::Current()
         .and_then(|data| data.LocalFolder())
@@ -605,8 +663,12 @@ fn run_timers(session: &Session) {
     // SAFETY: called once at the start of a thread we own.
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
 
+    let connected = Instant::now();
+    let peers = session.endpoints.len();
     let mut ticks: u64 = 0;
     let mut handshakes: Vec<Option<Duration>> = Vec::new();
+    // Per peer: when its current handshake attempt began, while it is unanswered.
+    let mut unanswered: Vec<Option<Instant>> = vec![None; peers];
     while !session.stop.load(Ordering::Relaxed) {
         std::thread::sleep(TICK_INTERVAL);
         ticks += 1;
@@ -623,6 +685,7 @@ fn run_timers(session: &Session) {
                 && before.is_none_or(|b| *age < b)
             {
                 file_log(&format!("handshake with peer {} completed", peer + 1));
+                unanswered[peer] = None;
             }
         }
         handshakes = now;
@@ -636,10 +699,80 @@ fn run_timers(session: &Session) {
         }
         let outgoing = lock(&session.tunnel).tick();
         for (peer, datagram) in outgoing {
+            if datagram.first() == Some(&HANDSHAKE_INITIATION) {
+                unanswered[peer].get_or_insert(Instant::now());
+            }
             // A lost keepalive or handshake is retried on a later tick.
             let _ = session.send(peer, &datagram);
         }
+
+        // A connection whose local address disappeared, or that stopped answering while the
+        // machine is online, is stranded on an old network. The channel's sockets can't be
+        // swapped once it runs (Windows accepts a replacement but never uses it), so the host
+        // exits instead: Windows then starts a fresh one and connects again within seconds.
+        let addresses = session
+            .network_changed
+            .swap(false, Ordering::Relaxed)
+            .then(local_ip_addresses);
+        for (peer, attempt) in unanswered.iter_mut().enumerate() {
+            let local = &session.local_addresses[peer];
+            let server = &session.endpoints[peer];
+            let gone = !local.is_empty()
+                && connected.elapsed() > SETTLE
+                && addresses.as_ref().is_some_and(|now| !now.contains(local));
+            let dead = attempt.is_some_and(|since| since.elapsed() >= DEAD_AFTER) && online();
+            if gone {
+                file_log(&format!("the connection to {server} from {local} is gone"));
+            } else if dead {
+                file_log(&format!("no reply from {server} while online"));
+            } else {
+                continue;
+            }
+            file_log("exiting so that Windows connects again");
+            std::process::exit(EXIT_RECONNECT);
+        }
     }
+}
+
+/// A socket's local IP address, for telling when that address is gone. Empty if unknown.
+fn local_address(socket: &DatagramSocket) -> String {
+    socket
+        .Information()
+        .and_then(|info| info.LocalAddress())
+        .and_then(|address| address.DisplayName())
+        .map(|name| ip_address(&name.to_string()))
+        .unwrap_or_default()
+}
+
+/// An IP address without its IPv6 zone (`fe80::1%12`), which Windows doesn't report
+/// consistently.
+fn ip_address(name: &str) -> String {
+    name.split('%').next().unwrap_or_default().to_string()
+}
+
+/// Every IP address the machine has right now, the tunnel's own included.
+fn local_ip_addresses() -> Vec<String> {
+    let Ok(names) = NetworkInformation::GetHostNames() else {
+        return Vec::new();
+    };
+    names
+        .into_iter()
+        .filter(|name| {
+            name.Type()
+                .is_ok_and(|t| t == HostNameType::Ipv4 || t == HostNameType::Ipv6)
+        })
+        .filter_map(|name| name.DisplayName().ok())
+        .map(|name| ip_address(&name.to_string()))
+        .collect()
+}
+
+/// Whether the machine is on a network at all. Without one, a silent peer is nothing to act
+/// on; the handshakes keep retrying until it comes back. Windows' own internet check can't be
+/// trusted here: it relies on DNS, which the tunnel takes over.
+fn online() -> bool {
+    NetworkInformation::GetInternetConnectionProfile()
+        .and_then(|profile| profile.GetNetworkConnectivityLevel())
+        .is_ok_and(|level| level != NetworkConnectivityLevel::None)
 }
 
 fn routes(s: &settings::ChannelSettings) -> Result<VpnRouteAssignment> {
@@ -723,7 +856,7 @@ fn new_packet(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Resul
 /// What kind of WireGuard message a datagram is, for log lines.
 fn describe_datagram(data: &[u8]) -> String {
     match data.first() {
-        Some(1) => "handshake initiation".into(),
+        Some(&HANDSHAKE_INITIATION) => "handshake initiation".into(),
         Some(2) => "handshake response".into(),
         Some(3) => "cookie reply".into(),
         Some(4) if data.len() >= 8 => {
