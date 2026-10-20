@@ -73,10 +73,15 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
     if settings.ipv6_addresses.is_empty() {
         settings.ipv6_addresses.push(PLACEHOLDER_IPV6);
     }
-    for net in peers.iter().flat_map(|p| &p.allowed_ips) {
-        match network(net) {
-            (IpAddr::V4(a), prefix) => push_unique(&mut settings.ipv4_routes, (a, prefix)),
-            (IpAddr::V6(a), prefix) => push_unique(&mut settings.ipv6_routes, (a, prefix)),
+    // Windows expects routes as network addresses (10.1.2.3/8 → 10.0.0.0/8).
+    for net in peers
+        .iter()
+        .flat_map(|p| &p.allowed_ips)
+        .map(IpNet::network)
+    {
+        match net.addr {
+            IpAddr::V4(a) => push_unique(&mut settings.ipv4_routes, (a, net.prefix)),
+            IpAddr::V6(a) => push_unique(&mut settings.ipv6_routes, (a, net.prefix)),
         }
     }
 
@@ -85,25 +90,6 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
         peers,
         settings,
     })
-}
-
-/// Clears host bits, since Windows expects routes as network addresses (10.1.2.3/8 → 10.0.0.0/8).
-fn network(net: &IpNet) -> (IpAddr, u8) {
-    let addr = match net.addr {
-        IpAddr::V4(a) => {
-            let mask = u32::MAX
-                .checked_shl(32 - u32::from(net.prefix))
-                .unwrap_or(0);
-            IpAddr::V4(Ipv4Addr::from(u32::from(a) & mask))
-        }
-        IpAddr::V6(a) => {
-            let mask = u128::MAX
-                .checked_shl(128 - u32::from(net.prefix))
-                .unwrap_or(0);
-            IpAddr::V6(Ipv6Addr::from(u128::from(a) & mask))
-        }
-    };
-    (addr, net.prefix)
 }
 
 fn push_unique<T: PartialEq>(list: &mut Vec<T>, item: T) {

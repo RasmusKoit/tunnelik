@@ -65,20 +65,28 @@ impl IpNet {
     /// Whether `addr` falls inside this network. An IPv4 network never contains an IPv6
     /// address, and the other way round.
     pub fn contains(&self, addr: IpAddr) -> bool {
-        match (self.addr, addr) {
-            (IpAddr::V4(net), IpAddr::V4(a)) => {
-                let mask = u32::MAX
-                    .checked_shl(32 - u32::from(self.prefix))
-                    .unwrap_or(0);
-                u32::from(net) & mask == u32::from(a) & mask
-            }
-            (IpAddr::V6(net), IpAddr::V6(a)) => {
-                let mask = u128::MAX
-                    .checked_shl(128 - u32::from(self.prefix))
-                    .unwrap_or(0);
-                u128::from(net) & mask == u128::from(a) & mask
-            }
-            _ => false,
+        addr.is_ipv4() == self.addr.is_ipv4() && masked(addr, self.prefix) == self.network().addr
+    }
+
+    /// The same network with its host bits cleared: 10.1.2.3/8 becomes 10.0.0.0/8.
+    pub fn network(&self) -> IpNet {
+        IpNet {
+            addr: masked(self.addr, self.prefix),
+            prefix: self.prefix,
+        }
+    }
+}
+
+/// `addr` with everything after the first `prefix` bits cleared.
+fn masked(addr: IpAddr, prefix: u8) -> IpAddr {
+    match addr {
+        IpAddr::V4(a) => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            IpAddr::V4((u32::from(a) & mask).into())
+        }
+        IpAddr::V6(a) => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            IpAddr::V6((u128::from(a) & mask).into())
         }
     }
 }
@@ -531,6 +539,18 @@ Endpoint = 203.0.113.10:13232
             ]
         );
         assert_eq!(iface.dns_search, vec!["corp.example".to_string()]);
+    }
+
+    #[test]
+    fn network_clears_host_bits() {
+        let net = |s: &str| s.parse::<IpNet>().unwrap();
+        assert_eq!(net("10.1.2.3/8").network(), net("10.0.0.0/8"));
+        assert_eq!(net("10.1.2.3/0").network(), net("0.0.0.0/0"));
+        assert_eq!(net("2001:db8::1/32").network(), net("2001:db8::/32"));
+        assert_eq!(net("10.9.8.7/32").network(), net("10.9.8.7/32"));
+        assert!(net("10.1.2.3/8").contains("10.200.0.1".parse().unwrap()));
+        assert!(!net("10.1.2.3/8").contains("11.0.0.1".parse().unwrap()));
+        assert!(!net("10.1.2.3/8").contains("::1".parse().unwrap()));
     }
 
     #[test]

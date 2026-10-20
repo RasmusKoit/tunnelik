@@ -47,7 +47,7 @@ pub fn validate(config_text: &str) -> Result<(), String> {
 }
 
 pub fn list() -> Result<Vec<Tunnel>, String> {
-    let connections = connections();
+    let connections = connections()?;
     Ok(store::list(&local_state()?)
         .into_iter()
         .map(|name| Tunnel {
@@ -159,13 +159,7 @@ pub fn details(name: &str) -> Result<Details, String> {
                 public_key: p.public_key.to_base64(),
                 has_preshared_key: p.preshared_key.is_some(),
                 allowed_ips: strings(&p.allowed_ips),
-                endpoint: p.endpoint.as_ref().map(|e| {
-                    if e.host.contains(':') {
-                        format!("[{}]:{}", e.host, e.port)
-                    } else {
-                        format!("{}:{}", e.host, e.port)
-                    }
-                }),
+                endpoint: p.endpoint.as_ref().map(ToString::to_string),
                 persistent_keepalive: p.persistent_keepalive,
             })
             .collect(),
@@ -236,7 +230,7 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
 /// Removes one of Tunnelik's own tunnels; other VPN connections are never touched.
 pub fn remove(name: &str) -> Result<(), String> {
     ensure_exists(name)?;
-    if state_of(&connections(), name) != State::Disconnected {
+    if state_of(&connections()?, name) != State::Disconnected {
         disconnect(name)?;
     }
     remove_profile(name, &package_family()?)?;
@@ -263,7 +257,7 @@ fn remove_profile(name: &str, family: &str) -> Result<(), String> {
 pub fn connect(name: &str) -> Result<(), String> {
     ensure_exists(name)?;
     let ours = store::list(&local_state()?);
-    for (other, state) in connections() {
+    for (other, state) in connections()? {
         let is_ours = ours.iter().any(|n| n.eq_ignore_ascii_case(&other));
         if is_ours && state != State::Disconnected && !other.eq_ignore_ascii_case(name) {
             rasdial(&[&other, "/disconnect"])?;
@@ -305,26 +299,37 @@ fn state_of(connections: &[(String, State)], name: &str) -> State {
 }
 
 /// All VPN connections Windows currently has open or is opening, with their state.
-fn connections() -> Vec<(String, State)> {
+fn connections() -> Result<Vec<(String, State)>, String> {
     use windows::Win32::NetworkManagement::Rras::{
         RASCONNSTATUSW, RASCONNW, RASCS_Connected, RASCS_Disconnected, RasEnumConnectionsW,
         RasGetConnectStatusW,
     };
+    const ERROR_BUFFER_TOO_SMALL: u32 = 603;
 
-    const MAX: usize = 32;
-    // SAFETY: RASCONNW is plain data, for which all zeroes is a valid value.
-    let mut conns: Vec<RASCONNW> = vec![unsafe { std::mem::zeroed() }; MAX];
-    for c in &mut conns {
-        c.dwSize = size_of::<RASCONNW>() as u32;
-    }
-    let mut bytes = (MAX * size_of::<RASCONNW>()) as u32;
+    let entries = |n: usize| -> Vec<RASCONNW> {
+        // SAFETY: RASCONNW is plain data, for which all zeroes is a valid value.
+        let mut conns: Vec<RASCONNW> = vec![unsafe { std::mem::zeroed() }; n];
+        for c in &mut conns {
+            c.dwSize = size_of::<RASCONNW>() as u32;
+        }
+        conns
+    };
+    let mut conns = entries(32);
+    let mut bytes = (conns.len() * size_of::<RASCONNW>()) as u32;
     let mut count = 0u32;
     // SAFETY: the buffer holds `bytes` bytes of RASCONNW entries with dwSize set.
-    let err = unsafe { RasEnumConnectionsW(Some(conns.as_mut_ptr()), &mut bytes, &mut count) };
-    if err != 0 {
-        return Vec::new();
+    let mut err = unsafe { RasEnumConnectionsW(Some(conns.as_mut_ptr()), &mut bytes, &mut count) };
+    if err == ERROR_BUFFER_TOO_SMALL {
+        // `bytes` now says how much is needed.
+        conns = entries((bytes as usize).div_ceil(size_of::<RASCONNW>()));
+        bytes = (conns.len() * size_of::<RASCONNW>()) as u32;
+        // SAFETY: as above, with the larger buffer.
+        err = unsafe { RasEnumConnectionsW(Some(conns.as_mut_ptr()), &mut bytes, &mut count) };
     }
-    conns
+    if err != 0 {
+        return Err(format!("listing VPN connections failed: RAS error {err}"));
+    }
+    Ok(conns
         .iter()
         .take(count as usize)
         .map(|c| {
@@ -347,7 +352,7 @@ fn connections() -> Vec<(String, State)> {
             };
             (String::from_utf16_lossy(&name[..len]), state)
         })
-        .collect()
+        .collect())
 }
 
 fn rasdial(args: &[&str]) -> Result<(), String> {

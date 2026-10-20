@@ -16,7 +16,8 @@ use windows::ApplicationModel::Background::{
     IBackgroundTask, IBackgroundTask_Impl, IBackgroundTaskInstance,
 };
 use windows::Networking::Connectivity::{
-    NetworkConnectivityLevel, NetworkInformation, NetworkStatusChangedEventHandler,
+    ConnectionProfile, NetworkConnectivityLevel, NetworkInformation,
+    NetworkStatusChangedEventHandler,
 };
 use windows::Networking::Sockets::DatagramSocket;
 use windows::Networking::Vpn::{
@@ -47,7 +48,8 @@ pub const TASK_CLASS: &str = "Tunnelik.VpnBackgroundTask";
 
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
-/// Handshake attempts unanswered for this long mean the connection to the peer is gone.
+/// A peer that answered nothing at all for this long, while handshakes were being retried, is
+/// gone. WireGuard retries a handshake every 5 seconds.
 const DEAD_AFTER: Duration = Duration::from_secs(10);
 /// Network changes this soon after connecting are our own interface coming up.
 const SETTLE: Duration = Duration::from_secs(5);
@@ -55,6 +57,8 @@ const SETTLE: Duration = Duration::from_secs(5);
 const EXIT_RECONNECT: i32 = 3;
 /// How long a connect waits for a network that is still coming up.
 const NETWORK_WAIT: Duration = Duration::from_secs(20);
+/// How long a connect keeps trying once Windows reports a network, for routes still settling.
+const NETWORK_GRACE: Duration = Duration::from_secs(3);
 /// First byte of a WireGuard handshake initiation message.
 const HANDSHAKE_INITIATION: u8 = 1;
 
@@ -83,6 +87,8 @@ struct Session {
     network_token: AtomicI64,
     /// The transport context that tags each peer's connection, by peer index.
     contexts: Vec<AgileContext>,
+    /// Datagrams received from each peer, for telling a silent peer from a lost handshake.
+    received: Vec<AtomicU64>,
     /// Set once Start returned. Sending through the channel before that deadlocks.
     started: AtomicBool,
     stop: AtomicBool,
@@ -187,12 +193,9 @@ impl Session {
         result
     }
 
-    /// Points an outgoing datagram at `peer`'s connection. A single peer has only one.
+    /// Points an outgoing datagram at `peer`'s connection.
     fn address(&self, packet: &VpnPacketBuffer, peer: usize) -> Result<()> {
-        match self.contexts.get(peer) {
-            Some(context) => packet.SetTransportContext(&context.0),
-            None => Ok(()),
-        }
+        packet.SetTransportContext(&self.contexts[peer].0)
     }
 
     /// Which peer an incoming datagram came from, by the connection it arrived on.
@@ -200,15 +203,12 @@ impl Session {
         let index = datagram
             .TransportContext()
             .or_else(|_| self.channel.CurrentRequestTransportContext())
-            .ok()
-            .and_then(|context| context.cast::<IReference<u32>>().ok())
-            .and_then(|index| index.Value().ok());
-        match index {
-            Some(index) => Some(index as usize),
-            // A single connection leaves no doubt.
-            None if self.contexts.len() == 1 => Some(0),
-            None => None,
-        }
+            .ok()?
+            .cast::<IReference<u32>>()
+            .ok()?
+            .Value()
+            .ok()? as usize;
+        (index < self.contexts.len()).then_some(index)
     }
 
     /// Writes the live status the app shows; see `live`.
@@ -442,7 +442,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
                     Stats::add(&stats.datagrams_out, 1);
                 }
                 Ok(None) => {}
-                Err(e) => log(channel, &format!("dropping outgoing packet: {e:?}")),
+                Err(e) => log_drop(&format!("dropping outgoing packet: {e:?}")),
             }
         }
         Ok(())
@@ -469,6 +469,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         let data = read_buffer(&datagram.Buffer()?)?;
         let out = lock(&session.tunnel).decapsulate(peer, &data);
         Stats::add(&session.stats.datagrams_in, 1);
+        Stats::add(&session.received[peer], 1);
         let stats = &session.stats;
         Stats::add(&stats.dropped, out.rejected);
         if let Some(e) = out.error {
@@ -523,7 +524,7 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         &format!("connecting tunnel `{name}` to {}", servers.join(", ")),
     );
 
-    wait_for_network(channel, &s.endpoints[0]);
+    wait_for_network(channel, &name, &s.endpoints[0]);
 
     // Each socket must be associated before it connects, so Windows keeps it outside the
     // tunnel. Every peer gets its own transport, tagged with the peer's index.
@@ -556,6 +557,7 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         local_addresses: sockets.iter().map(local_address).collect(),
         _sockets: sockets,
         endpoints: s.endpoints.clone(),
+        received: (0..s.endpoints.len()).map(|_| AtomicU64::new(0)).collect(),
         contexts,
         started: AtomicBool::new(false),
         stop: AtomicBool::new(false),
@@ -620,8 +622,9 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
 
 /// Right after a network change, Windows starts the plugin again before the new network has
 /// its addresses and routes, and a connect in that window fails with "no such host". Waits,
-/// within reason, until a throwaway socket can reach the server; the real sockets follow.
-fn wait_for_network(channel: &VpnChannel, endpoint: &Endpoint) {
+/// within reason, until a throwaway socket can reach the server; the real sockets follow. On
+/// a machine that is online the wait is short, so a wrong server name fails promptly.
+fn wait_for_network(channel: &VpnChannel, tunnel: &str, endpoint: &Endpoint) {
     let started = Instant::now();
     let mut logged = false;
     loop {
@@ -633,10 +636,15 @@ fn wait_for_network(channel: &VpnChannel, endpoint: &Endpoint) {
                 )?
                 .join()
         });
+        let limit = if online(tunnel) {
+            NETWORK_GRACE
+        } else {
+            NETWORK_WAIT
+        };
         match probe {
             Ok(()) => return,
             // The real connect reports the error.
-            Err(_) if started.elapsed() >= NETWORK_WAIT => return,
+            Err(_) if started.elapsed() >= limit => return,
             Err(e) => {
                 if !logged {
                     log(
@@ -667,8 +675,10 @@ fn run_timers(session: &Session) {
     let peers = session.endpoints.len();
     let mut ticks: u64 = 0;
     let mut handshakes: Vec<Option<Duration>> = Vec::new();
-    // Per peer: when its current handshake attempt began, while it is unanswered.
-    let mut unanswered: Vec<Option<Instant>> = vec![None; peers];
+    // Per peer: whether it ever completed a handshake in this session, and while a handshake
+    // attempt is unanswered, when the peer was last heard from (or the attempt began).
+    let mut handshaken = vec![false; peers];
+    let mut unanswered: Vec<Option<(Instant, u64)>> = vec![None; peers];
     while !session.stop.load(Ordering::Relaxed) {
         std::thread::sleep(TICK_INTERVAL);
         ticks += 1;
@@ -685,6 +695,7 @@ fn run_timers(session: &Session) {
                 && before.is_none_or(|b| *age < b)
             {
                 file_log(&format!("handshake with peer {} completed", peer + 1));
+                handshaken[peer] = true;
                 unanswered[peer] = None;
             }
         }
@@ -700,33 +711,51 @@ fn run_timers(session: &Session) {
         let outgoing = lock(&session.tunnel).tick();
         for (peer, datagram) in outgoing {
             if datagram.first() == Some(&HANDSHAKE_INITIATION) {
-                unanswered[peer].get_or_insert(Instant::now());
+                let received = session.received[peer].load(Ordering::Relaxed);
+                unanswered[peer].get_or_insert((Instant::now(), received));
             }
             // A lost keepalive or handshake is retried on a later tick.
             let _ = session.send(peer, &datagram);
         }
 
-        // A connection whose local address disappeared, or that stopped answering while the
-        // machine is online, is stranded on an old network. The channel's sockets can't be
-        // swapped once it runs (Windows accepts a replacement but never uses it), so the host
-        // exits instead: Windows then starts a fresh one and connects again within seconds.
+        // A connection whose local address disappeared, or whose peer went silent after it
+        // had worked, is stranded on an old network. The channel's sockets can't be swapped
+        // once it runs (Windows accepts a replacement but never uses it), so the host exits
+        // instead: Windows then starts a fresh one and connects again within seconds. Without
+        // a network there is nothing to connect to yet, so that waits for the next change.
         let addresses = session
             .network_changed
             .swap(false, Ordering::Relaxed)
             .then(local_ip_addresses);
+        let mut has_network = None;
         for (peer, attempt) in unanswered.iter_mut().enumerate() {
             let local = &session.local_addresses[peer];
             let server = &session.endpoints[peer];
             let gone = !local.is_empty()
                 && connected.elapsed() > SETTLE
                 && addresses.as_ref().is_some_and(|now| !now.contains(local));
-            let dead = attempt.is_some_and(|since| since.elapsed() >= DEAD_AFTER) && online();
+            // Anything received from the peer, even while its handshake goes unanswered (a
+            // rekey lost on a lossy link while the old session still works), restarts the clock.
+            let received = session.received[peer].load(Ordering::Relaxed);
+            if let Some((_, seen)) = *attempt
+                && received != seen
+            {
+                *attempt = Some((Instant::now(), received));
+            }
+            let silent = attempt.is_some_and(|(since, _)| since.elapsed() >= DEAD_AFTER);
+            if !(gone || (silent && handshaken[peer])) {
+                continue;
+            }
+            if !*has_network.get_or_insert_with(|| online(&session.name)) {
+                continue;
+            }
             if gone {
                 file_log(&format!("the connection to {server} from {local} is gone"));
-            } else if dead {
-                file_log(&format!("no reply from {server} while online"));
             } else {
-                continue;
+                file_log(&format!(
+                    "nothing from {server} for {}s",
+                    DEAD_AFTER.as_secs()
+                ));
             }
             file_log("exiting so that Windows connects again");
             std::process::exit(EXIT_RECONNECT);
@@ -766,13 +795,18 @@ fn local_ip_addresses() -> Vec<String> {
         .collect()
 }
 
-/// Whether the machine is on a network at all. Without one, a silent peer is nothing to act
-/// on; the handshakes keep retrying until it comes back. Windows' own internet check can't be
-/// trusted here: it relies on DNS, which the tunnel takes over.
-fn online() -> bool {
-    NetworkInformation::GetInternetConnectionProfile()
-        .and_then(|profile| profile.GetNetworkConnectivityLevel())
-        .is_ok_and(|level| level != NetworkConnectivityLevel::None)
+/// Whether the machine is on a network other than the tunnel itself. Without one, a silent
+/// peer is nothing to act on; the handshakes keep retrying until it comes back. Windows' own
+/// internet check can't be trusted here: it relies on DNS, which the tunnel takes over.
+fn online(tunnel: &str) -> bool {
+    let connected = |profile: &ConnectionProfile| {
+        !profile.ProfileName().is_ok_and(|name| name == tunnel)
+            && profile
+                .GetNetworkConnectivityLevel()
+                .is_ok_and(|level| level != NetworkConnectivityLevel::None)
+    };
+    NetworkInformation::GetConnectionProfiles()
+        .is_ok_and(|profiles| profiles.into_iter().any(|p| connected(&p)))
 }
 
 fn routes(s: &settings::ChannelSettings) -> Result<VpnRouteAssignment> {
@@ -911,12 +945,18 @@ pub fn file_log(message: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    // One write per line: the timer thread and Windows' packet callbacks log concurrently, and
+    // piecewise writes from both would interleave.
+    let line = format!(
+        "{h:02}:{m:02}:{s:02} UTC {message}
+"
+    );
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("plugin.log"))
     {
-        let _ = writeln!(file, "{h:02}:{m:02}:{s:02} UTC {message}");
+        let _ = file.write_all(line.as_bytes());
     }
 }
 
