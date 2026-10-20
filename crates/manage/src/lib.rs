@@ -123,7 +123,8 @@ pub struct Details {
     pub public_key: String,
     pub listen_port: Option<u16>,
     pub addresses: Vec<String>,
-    pub dns: Vec<String>,
+    pub dns_servers: Vec<String>,
+    pub dns_search: Vec<String>,
     pub mtu: Option<u16>,
     pub peers: Vec<PeerDetails>,
 }
@@ -145,12 +146,8 @@ pub fn details(name: &str) -> Result<Details, String> {
         public_key: tunnelik_plugin::tunnel::public_key(&iface.private_key).to_base64(),
         listen_port: iface.listen_port,
         addresses: strings(&iface.addresses),
-        dns: iface
-            .dns_servers
-            .iter()
-            .map(ToString::to_string)
-            .chain(iface.dns_search.iter().cloned())
-            .collect(),
+        dns_servers: iface.dns_servers.iter().map(ToString::to_string).collect(),
+        dns_search: iface.dns_search.clone(),
         mtu: iface.mtu,
         peers: config
             .peers

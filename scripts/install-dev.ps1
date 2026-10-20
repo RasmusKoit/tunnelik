@@ -23,6 +23,11 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 # with a higher version. (Removing the package first collided with Windows re-registering it, e.g.
 # while the Settings VPN page was open, and left the removal stuck until a reboot.) Windows runs
 # the package from this folder, so it has to stay in place while installed.
+# Disconnect first: Windows restarts a plugin host that dies while connected, which would bring
+# the old binary back in the middle of the update.
+Get-VpnConnection -ErrorAction SilentlyContinue |
+    Where-Object { $_.PlugInApplicationID -like 'RasmusKoit.Tunnelik_*' -and $_.ConnectionStatus -ne 'Disconnected' } |
+    ForEach-Object { rasdial $_.Name /disconnect | Out-Null }
 Get-Process tunnelik_host, tunnelik-app -ErrorAction SilentlyContinue | Stop-Process -Force
 New-Item -ItemType Directory -Force $out | Out-Null
 

@@ -186,7 +186,8 @@ function renderInterface() {
     ["Public key", details.publicKey, true],
     ["Listen port", details.listenPort],
     ["Addresses", details.addresses],
-    ["DNS servers", details.dns],
+    ["DNS servers", details.dnsServers],
+    ["Search domains", details.dnsSearch],
     ["MTU", details.mtu],
   ]);
   ui.toggle.textContent = state === "disconnected" ? "Activate" : "Deactivate";

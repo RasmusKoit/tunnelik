@@ -9,6 +9,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 pub const KEY_LEN: usize = 32;
+/// Smallest MTU IPv4 requires; below it nothing works, and the error only shows at connect.
+pub const MIN_MTU: u16 = 576;
+pub const MAX_MTU: u16 = u16::MAX;
 
 /// A Curve25519 key or preshared key.
 #[derive(Clone, PartialEq, Eq)]
@@ -297,7 +300,16 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                         key,
                         line,
                     )?,
-                    "mtu" => set_once(&mut iface.mtu, parse_num(value, key, line)?, key, line)?,
+                    "mtu" => {
+                        let mtu: u16 = parse_num(value, key, line)?;
+                        if !(MIN_MTU..=MAX_MTU).contains(&mtu) {
+                            return Err(ParseError::at(
+                                line,
+                                format!("MTU must be between {MIN_MTU} and {MAX_MTU}"),
+                            ));
+                        }
+                        set_once(&mut iface.mtu, mtu, key, line)?
+                    }
                     "address" => {
                         for item in list(value) {
                             iface.addresses.push(parse_net(item, line)?);
@@ -539,6 +551,25 @@ Endpoint = 203.0.113.10:13232
             ]
         );
         assert_eq!(iface.dns_search, vec!["corp.example".to_string()]);
+    }
+
+    #[test]
+    fn mtu_range() {
+        let with = |mtu: &str| {
+            parse(&format!(
+                "[Interface]\nPrivateKey = {}\nAddress = 10.0.0.2\nMTU = {mtu}\n[Peer]\nPublicKey = {}\n",
+                key(1).to_base64(),
+                key(2).to_base64()
+            ))
+        };
+        assert_eq!(with("1280").unwrap().interface.mtu, Some(1280));
+        assert!(with("100").unwrap_err().message.contains("between"));
+        assert!(
+            with("70000")
+                .unwrap_err()
+                .message
+                .contains("invalid number")
+        );
     }
 
     #[test]

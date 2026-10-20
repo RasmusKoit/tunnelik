@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -15,10 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::ApplicationModel::Background::{
     IBackgroundTask, IBackgroundTask_Impl, IBackgroundTaskInstance,
 };
-use windows::Networking::Connectivity::{
-    ConnectionProfile, NetworkConnectivityLevel, NetworkInformation,
-    NetworkStatusChangedEventHandler,
-};
+use windows::Networking::Connectivity::{NetworkInformation, NetworkStatusChangedEventHandler};
 use windows::Networking::Sockets::DatagramSocket;
 use windows::Networking::Vpn::{
     IVpnPlugIn, IVpnPlugIn_Impl, VpnChannel, VpnDataPathType, VpnDomainNameAssignment,
@@ -57,8 +55,6 @@ const SETTLE: Duration = Duration::from_secs(5);
 const EXIT_RECONNECT: i32 = 3;
 /// How long a connect waits for a network that is still coming up.
 const NETWORK_WAIT: Duration = Duration::from_secs(20);
-/// How long a connect keeps trying once Windows reports a network, for routes still settling.
-const NETWORK_GRACE: Duration = Duration::from_secs(3);
 /// First byte of a WireGuard handshake initiation message.
 const HANDSHAKE_INITIATION: u8 = 1;
 
@@ -78,9 +74,11 @@ struct Session {
     _sockets: Vec<DatagramSocket>,
     /// Where each peer's connection goes, for the log.
     endpoints: Vec<Endpoint>,
-    /// The local IP address each peer's connection goes out from. Once that address is gone,
-    /// so is the connection.
-    local_addresses: Vec<String>,
+    /// The local IP address each peer's connection goes out from, if known. Once that address
+    /// is gone, so is the connection.
+    local_addresses: Vec<Option<IpAddr>>,
+    /// The tunnel's own addresses, which no connection to a peer may come from.
+    tunnel_addresses: Vec<IpAddr>,
     /// Set by Windows' network status event; the timer thread checks the connections.
     network_changed: AtomicBool,
     /// Registration of that event, removed with the session.
@@ -262,21 +260,20 @@ impl Session {
     }
 }
 
-/// Exits the host once its connection is over. The Connect event of a finished connection never
-/// completes, and Windows kills its host 90 seconds after the disconnect, taking any newer
-/// connection in the same process with it. Exiting now gives the next connect a fresh host.
+/// Asks for the host to exit once the current event is handled. The Connect event of a finished
+/// connection never completes, and Windows kills its host 90 seconds after the disconnect,
+/// taking any newer connection in the same process with it. Exiting gives the next connect a
+/// fresh host. It happens at the end of the event rather than from a timer: Windows may suspend
+/// the host as soon as the event is handled, and a suspended timer only fires when the next
+/// event resumes the process, which is then in the way of that event's connect.
 fn retire_host() {
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(500));
-        // When switching tunnels the next Connect may already run here, before it has a session.
-        if current_session().is_none() && CONNECTING.load(Ordering::SeqCst) == 0 {
-            file_log("exiting the host process");
-            std::process::exit(0);
-        }
-    });
+    RETIRE.store(true, Ordering::SeqCst);
 }
 
-/// Connects in progress in this process, so retire_host doesn't exit underneath one.
+/// Set by `retire_host`, acted on when the event that set it is done.
+static RETIRE: AtomicBool = AtomicBool::new(false);
+
+/// Connects in progress in this process, so retiring doesn't exit underneath one.
 static CONNECTING: AtomicUsize = AtomicUsize::new(0);
 
 struct ConnectInProgress;
@@ -341,6 +338,14 @@ impl IBackgroundTask_Impl for BackgroundTask_Impl {
             file_log(&format!("handling a VPN event failed: {}", e.message()));
         }
         RUNS.record(started);
+        // When switching tunnels the next Connect may already run here, before it has a session.
+        if RETIRE.swap(false, Ordering::SeqCst)
+            && current_session().is_none()
+            && CONNECTING.load(Ordering::SeqCst) == 0
+        {
+            file_log("exiting the host process");
+            std::process::exit(0);
+        }
         result
     }
 }
@@ -469,7 +474,11 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
         let data = read_buffer(&datagram.Buffer()?)?;
         let out = lock(&session.tunnel).decapsulate(peer, &data);
         Stats::add(&session.stats.datagrams_in, 1);
-        Stats::add(&session.received[peer], 1);
+        // Only what decrypted counts as hearing from the peer: after a reconnect the server
+        // keeps sending to its old session for a while, and that proves nothing.
+        if out.error.is_none() {
+            Stats::add(&session.received[peer], 1);
+        }
         let stats = &session.stats;
         Stats::add(&stats.dropped, out.rejected);
         if let Some(e) = out.error {
@@ -524,7 +533,13 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         &format!("connecting tunnel `{name}` to {}", servers.join(", ")),
     );
 
-    wait_for_network(channel, &name, &s.endpoints[0]);
+    let tunnel_addresses: Vec<IpAddr> = s
+        .ipv4_addresses
+        .iter()
+        .map(|a| IpAddr::V4(*a))
+        .chain(s.ipv6_addresses.iter().map(|a| IpAddr::V6(*a)))
+        .collect();
+    wait_for_network(channel, &s.endpoints[0], &tunnel_addresses);
 
     // Each socket must be associated before it connects, so Windows keeps it outside the
     // tunnel. Every peer gets its own transport, tagged with the peer's index.
@@ -555,6 +570,7 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         tunnel: Mutex::new(Tunnel::new(setup.interface, setup.peers, session_index())),
         channel: channel.clone(),
         local_addresses: sockets.iter().map(local_address).collect(),
+        tunnel_addresses,
         _sockets: sockets,
         endpoints: s.endpoints.clone(),
         received: (0..s.endpoints.len()).map(|_| AtomicU64::new(0)).collect(),
@@ -622,29 +638,16 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
 
 /// Right after a network change, Windows starts the plugin again before the new network has
 /// its addresses and routes, and a connect in that window fails with "no such host". Waits,
-/// within reason, until a throwaway socket can reach the server; the real sockets follow. On
-/// a machine that is online the wait is short, so a wrong server name fails promptly.
-fn wait_for_network(channel: &VpnChannel, tunnel: &str, endpoint: &Endpoint) {
+/// within reason, until the server is reachable; the real sockets follow. A wrong server name
+/// looks the same as a missing network, so it costs the whole wait before its error shows.
+fn wait_for_network(channel: &VpnChannel, endpoint: &Endpoint, tunnel_addresses: &[IpAddr]) {
     let started = Instant::now();
     let mut logged = false;
     loop {
-        let probe = DatagramSocket::new().and_then(|socket| {
-            socket
-                .ConnectAsync(
-                    &host(&endpoint.host)?,
-                    &HSTRING::from(endpoint.port.to_string()),
-                )?
-                .join()
-        });
-        let limit = if online(tunnel) {
-            NETWORK_GRACE
-        } else {
-            NETWORK_WAIT
-        };
-        match probe {
+        match reachable(endpoint, tunnel_addresses) {
             Ok(()) => return,
             // The real connect reports the error.
-            Err(_) if started.elapsed() >= limit => return,
+            Err(_) if started.elapsed() >= NETWORK_WAIT => return,
             Err(e) => {
                 if !logged {
                     log(
@@ -656,6 +659,27 @@ fn wait_for_network(channel: &VpnChannel, tunnel: &str, endpoint: &Endpoint) {
                 std::thread::sleep(Duration::from_millis(500));
             }
         }
+    }
+}
+
+/// Whether the server can be reached over something other than the tunnel itself: a throwaway
+/// UDP connect succeeds, from an address that is not the tunnel's own. Windows' own
+/// connectivity levels are no use here: virtual adapters (WSL, Hyper-V) report local access
+/// forever, and the internet check relies on DNS, which the tunnel takes over.
+fn reachable(endpoint: &Endpoint, tunnel_addresses: &[IpAddr]) -> Result<()> {
+    let socket = DatagramSocket::new()?;
+    socket
+        .ConnectAsync(
+            &host(&endpoint.host)?,
+            &HSTRING::from(endpoint.port.to_string()),
+        )?
+        .join()?;
+    match local_address(&socket) {
+        Some(local) if tunnel_addresses.contains(&local) => Err(Error::new(
+            E_FAIL,
+            "the server is only reachable through the tunnel itself",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -727,13 +751,13 @@ fn run_timers(session: &Session) {
             .network_changed
             .swap(false, Ordering::Relaxed)
             .then(local_ip_addresses);
-        let mut has_network = None;
         for (peer, attempt) in unanswered.iter_mut().enumerate() {
-            let local = &session.local_addresses[peer];
+            let local = session.local_addresses[peer];
             let server = &session.endpoints[peer];
-            let gone = !local.is_empty()
-                && connected.elapsed() > SETTLE
-                && addresses.as_ref().is_some_and(|now| !now.contains(local));
+            let gone = connected.elapsed() > SETTLE
+                && local.is_some_and(|local| {
+                    addresses.as_ref().is_some_and(|now| !now.contains(&local))
+                });
             // Anything received from the peer, even while its handshake goes unanswered (a
             // rekey lost on a lossy link while the old session still works), restarts the clock.
             let received = session.received[peer].load(Ordering::Relaxed);
@@ -746,10 +770,10 @@ fn run_timers(session: &Session) {
             if !(gone || (silent && handshaken[peer])) {
                 continue;
             }
-            if !*has_network.get_or_insert_with(|| online(&session.name)) {
+            if reachable(server, &session.tunnel_addresses).is_err() {
                 continue;
             }
-            if gone {
+            if let Some(local) = local.filter(|_| gone) {
                 file_log(&format!("the connection to {server} from {local} is gone"));
             } else {
                 file_log(&format!(
@@ -763,24 +787,21 @@ fn run_timers(session: &Session) {
     }
 }
 
-/// A socket's local IP address, for telling when that address is gone. Empty if unknown.
-fn local_address(socket: &DatagramSocket) -> String {
-    socket
-        .Information()
-        .and_then(|info| info.LocalAddress())
-        .and_then(|address| address.DisplayName())
-        .map(|name| ip_address(&name.to_string()))
-        .unwrap_or_default()
+/// A socket's local IP address, for telling when that address is gone.
+fn local_address(socket: &DatagramSocket) -> Option<IpAddr> {
+    let name = socket.Information().ok()?.LocalAddress().ok()?;
+    ip_address(&name)
 }
 
-/// An IP address without its IPv6 zone (`fe80::1%12`), which Windows doesn't report
-/// consistently.
-fn ip_address(name: &str) -> String {
-    name.split('%').next().unwrap_or_default().to_string()
+/// A host name as an IP address, without its IPv6 zone (`fe80::1%12`), which Windows doesn't
+/// report consistently.
+fn ip_address(name: &HostName) -> Option<IpAddr> {
+    let name = name.DisplayName().ok()?.to_string();
+    name.split('%').next()?.parse().ok()
 }
 
 /// Every IP address the machine has right now, the tunnel's own included.
-fn local_ip_addresses() -> Vec<String> {
+fn local_ip_addresses() -> Vec<IpAddr> {
     let Ok(names) = NetworkInformation::GetHostNames() else {
         return Vec::new();
     };
@@ -790,23 +811,8 @@ fn local_ip_addresses() -> Vec<String> {
             name.Type()
                 .is_ok_and(|t| t == HostNameType::Ipv4 || t == HostNameType::Ipv6)
         })
-        .filter_map(|name| name.DisplayName().ok())
-        .map(|name| ip_address(&name.to_string()))
+        .filter_map(|name| ip_address(&name))
         .collect()
-}
-
-/// Whether the machine is on a network other than the tunnel itself. Without one, a silent
-/// peer is nothing to act on; the handshakes keep retrying until it comes back. Windows' own
-/// internet check can't be trusted here: it relies on DNS, which the tunnel takes over.
-fn online(tunnel: &str) -> bool {
-    let connected = |profile: &ConnectionProfile| {
-        !profile.ProfileName().is_ok_and(|name| name == tunnel)
-            && profile
-                .GetNetworkConnectivityLevel()
-                .is_ok_and(|level| level != NetworkConnectivityLevel::None)
-    };
-    NetworkInformation::GetConnectionProfiles()
-        .is_ok_and(|profiles| profiles.into_iter().any(|p| connected(&p)))
 }
 
 fn routes(s: &settings::ChannelSettings) -> Result<VpnRouteAssignment> {

@@ -50,7 +50,8 @@ mod commands {
         public_key: String,
         listen_port: Option<u16>,
         addresses: Vec<String>,
-        dns: Vec<String>,
+        dns_servers: Vec<String>,
+        dns_search: Vec<String>,
         mtu: Option<u16>,
         peers: Vec<Peer>,
     }
@@ -74,7 +75,8 @@ mod commands {
                 public_key: d.public_key,
                 listen_port: d.listen_port,
                 addresses: d.addresses,
-                dns: d.dns,
+                dns_servers: d.dns_servers,
+                dns_search: d.dns_search,
                 mtu: d.mtu,
                 peers: d
                     .peers

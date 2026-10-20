@@ -20,8 +20,7 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
         [] => manage::open_app(),
-        ["add", name, file] => std::fs::read_to_string(file)
-            .map_err(|e| format!("reading {file}: {e}"))
+        ["add", name, file] => read_config(file)
             .and_then(|text| manage::save(name, &text))
             .map(|()| {
                 println!(
@@ -58,6 +57,24 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Reads a config as text. Notepad's "Unicode" encoding is UTF-16 with a byte order mark, which
+/// the official app's export never uses but people re-save into.
+#[cfg(windows)]
+fn read_config(file: &str) -> Result<String, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("reading {file}: {e}"))?;
+    let utf16 = |decode: fn([u8; 2]) -> u16| {
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().map(|&pair| decode(pair)).collect();
+        String::from_utf16(&units).map_err(|_| format!("{file} is not valid UTF-16 text"))
+    };
+    match bytes[..] {
+        [0xFF, 0xFE, ..] => utf16(u16::from_le_bytes),
+        [0xFE, 0xFF, ..] => utf16(u16::from_be_bytes),
+        _ => String::from_utf8(bytes)
+            .map_err(|_| format!("{file} is not UTF-8 text; save it as UTF-8 and try again")),
     }
 }
 

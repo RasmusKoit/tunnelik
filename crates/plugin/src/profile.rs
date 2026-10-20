@@ -12,13 +12,30 @@ pub fn validate_name(name: &str) -> Result<(), String> {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || " -_.".contains(c));
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
+    if !valid {
+        return Err(format!(
             "invalid tunnel name `{name}`: use up to 64 letters, digits, spaces, `-`, `_` or `.`"
-        ))
+        ));
     }
+    if is_device_name(name) {
+        return Err(format!(
+            "invalid tunnel name `{name}`: Windows reserves it for a device"
+        ));
+    }
+    Ok(())
+}
+
+/// Names Windows won't allow as files, with or without an extension: `CON`, `nul.conf`.
+fn is_device_name(name: &str) -> bool {
+    const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let stem = name.split('.').next().unwrap_or(name);
+    let numbered = |prefix: &str| {
+        stem.len() == 4
+            && stem[..3].eq_ignore_ascii_case(prefix)
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0'
+    };
+    DEVICES.iter().any(|d| stem.eq_ignore_ascii_case(d)) || numbered("COM") || numbered("LPT")
 }
 
 pub fn custom_configuration(name: &str) -> String {
@@ -96,8 +113,16 @@ mod tests {
             "a\\b",
             "a\"b",
             &"x".repeat(65),
+            "CON",
+            "nul",
+            "Aux.conf",
+            "COM1",
+            "lpt9.x",
         ] {
             assert!(validate_name(bad).is_err(), "{bad}");
+        }
+        for good in ["COM0", "COM10", "CONF", "Console", "LPT"] {
+            assert!(validate_name(good).is_ok(), "{good}");
         }
     }
 }
