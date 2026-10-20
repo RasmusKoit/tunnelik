@@ -10,6 +10,8 @@ is not needed.
 Tunnelik is an independent project, not affiliated with or endorsed by the WireGuard project.
 See [Trademarks](#trademarks).
 
+![The Tunnelik window: tunnels with their switches on the left, the selected tunnel's interface and peer on the right](docs/tunnelik-window.png)
+
 ## Features
 
 - **Native toggle**: connect and disconnect wherever Windows shows VPNs, including the flyout.
