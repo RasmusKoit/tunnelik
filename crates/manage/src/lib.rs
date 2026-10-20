@@ -61,6 +61,41 @@ pub fn read(name: &str) -> Result<String, String> {
     store::load(&local_state()?, name)
 }
 
+/// What the plugin last reported about a connected tunnel's peers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivePeer {
+    pub public_key: String,
+    pub last_handshake_secs_ago: Option<u64>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// Live counters for `name`, if it is the tunnel the plugin is running right now. The plugin
+/// rewrites its status every 2 seconds, so anything older belongs to a finished connection.
+pub fn live(name: &str) -> Option<Vec<LivePeer>> {
+    let text =
+        std::fs::read_to_string(local_state().ok()?.join(tunnelik_plugin::live::FILE)).ok()?;
+    let live = tunnelik_plugin::live::decode(&text)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if !live.tunnel.eq_ignore_ascii_case(name) || now.saturating_sub(live.updated) > 10 {
+        return None;
+    }
+    Some(
+        live.peers
+            .into_iter()
+            .map(|p| LivePeer {
+                public_key: p.public_key,
+                last_handshake_secs_ago: p.last_handshake.map(|t| now.saturating_sub(t)),
+                rx_bytes: p.rx_bytes,
+                tx_bytes: p.tx_bytes,
+            })
+            .collect(),
+    )
+}
+
 /// Recreates missing VPN connections for saved tunnels, and returns their names. Windows deletes
 /// a VPN plugin's connections when the plugin's package is uninstalled (say, when moving from a
 /// development install to the signed package), while the encrypted configs survive.
@@ -179,7 +214,8 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
         "#,
         &[
             ("TUNNELIK_NAME", name),
-            ("TUNNELIK_SERVER", &s.endpoint.host),
+            // Shown in Settings; the plugin connects to every peer's endpoint itself.
+            ("TUNNELIK_SERVER", &s.endpoints[0].host),
             ("TUNNELIK_FAMILY", &family),
             ("TUNNELIK_PROFILE", &profile::custom_configuration(name)),
             ("TUNNELIK_SPLIT", if full_tunnel { "0" } else { "1" }),

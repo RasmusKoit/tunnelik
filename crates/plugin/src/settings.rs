@@ -15,28 +15,38 @@ pub const PLACEHOLDER_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd77, 0x6731, 0x3100, 0, 
 pub struct ChannelSettings {
     pub ipv4_addresses: Vec<Ipv4Addr>,
     pub ipv6_addresses: Vec<Ipv6Addr>,
-    /// Networks routed into the tunnel, from the peer's AllowedIPs.
+    /// Networks routed into the tunnel: all peers' AllowedIPs together.
     pub ipv4_routes: Vec<(Ipv4Addr, u8)>,
     pub ipv6_routes: Vec<(Ipv6Addr, u8)>,
     pub dns_servers: Vec<IpAddr>,
     pub dns_search: Vec<String>,
     pub mtu: u32,
     pub max_frame_size: u32,
-    pub endpoint: Endpoint,
+    /// One per peer, in the config's order. Each gets its own UDP connection.
+    pub endpoints: Vec<Endpoint>,
 }
 
 /// The parts of a config the plugin works with.
 pub struct TunnelSetup<'a> {
     pub interface: &'a Interface,
-    pub peer: &'a Peer,
+    pub peers: &'a [Peer],
     pub settings: ChannelSettings,
 }
 
 pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
-    let [peer] = config.peers.as_slice() else {
-        return Err("only one [Peer] per tunnel is supported".into());
-    };
-    let endpoint = peer.endpoint.clone().ok_or("[Peer] is missing Endpoint")?;
+    let peers = config.peers.as_slice();
+    // Windows only lets the plugin send to the servers it connected to, so a peer without an
+    // Endpoint could never be reached.
+    let endpoints = peers
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.endpoint.clone().ok_or_else(|| match peers.len() {
+                1 => "[Peer] is missing Endpoint".to_string(),
+                _ => format!("[Peer] number {} is missing Endpoint", i + 1),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let interface = &config.interface;
 
     let mut settings = ChannelSettings {
@@ -48,7 +58,7 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
         dns_search: interface.dns_search.clone(),
         mtu: interface.mtu.unwrap_or(DEFAULT_MTU).into(),
         max_frame_size: 0,
-        endpoint,
+        endpoints,
     };
     settings.max_frame_size = settings.mtu + FRAME_OVERHEAD;
 
@@ -63,7 +73,7 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
     if settings.ipv6_addresses.is_empty() {
         settings.ipv6_addresses.push(PLACEHOLDER_IPV6);
     }
-    for net in &peer.allowed_ips {
+    for net in peers.iter().flat_map(|p| &p.allowed_ips) {
         match network(net) {
             (IpAddr::V4(a), prefix) => push_unique(&mut settings.ipv4_routes, (a, prefix)),
             (IpAddr::V6(a), prefix) => push_unique(&mut settings.ipv6_routes, (a, prefix)),
@@ -72,7 +82,7 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
 
     Ok(TunnelSetup {
         interface,
-        peer,
+        peers,
         settings,
     })
 }
@@ -155,11 +165,11 @@ mod tests {
         assert_eq!(s.mtu, 1420);
         assert_eq!(s.max_frame_size, 1484);
         assert_eq!(
-            s.endpoint,
-            Endpoint {
+            s.endpoints,
+            vec![Endpoint {
                 host: "203.0.113.10".into(),
                 port: 13232
-            }
+            }]
         );
     }
 
@@ -209,22 +219,42 @@ mod tests {
     }
 
     #[test]
-    fn requires_endpoint_and_single_peer() {
+    fn requires_an_endpoint_per_peer() {
         let no_endpoint = config("10.0.0.0/8", None);
-        assert!(
-            from_config(&no_endpoint)
-                .err()
-                .unwrap()
-                .contains("Endpoint")
-        );
+        let e = from_config(&no_endpoint).err().unwrap();
+        assert_eq!(e, "[Peer] is missing Endpoint");
 
-        let mut two_peers = config("10.0.0.0/8", Some("vpn.example:1"));
-        two_peers.peers.push(two_peers.peers[0].clone());
-        assert!(
-            from_config(&two_peers)
-                .err()
-                .unwrap()
-                .contains("one [Peer]")
+        let mut two = config("10.0.0.0/8", Some("vpn.example:1"));
+        let mut second = two.peers[0].clone();
+        second.endpoint = None;
+        two.peers.push(second);
+        let e = from_config(&two).err().unwrap();
+        assert_eq!(e, "[Peer] number 2 is missing Endpoint");
+    }
+
+    #[test]
+    fn several_peers_combine_routes() {
+        let mut two = config("10.0.0.0/8, 192.168.11.0/24", Some("a.example:1"));
+        let mut second = two.peers[0].clone();
+        second.allowed_ips = vec![
+            "172.16.0.0/12".parse().unwrap(),
+            "10.0.0.0/8".parse().unwrap(),
+        ];
+        second.endpoint = Some("b.example:2".parse().unwrap());
+        two.peers.push(second);
+
+        let setup = from_config(&two).unwrap();
+        assert_eq!(setup.peers.len(), 2);
+        let s = setup.settings;
+        assert_eq!(
+            s.ipv4_routes,
+            vec![
+                (Ipv4Addr::new(10, 0, 0, 0), 8),
+                (Ipv4Addr::new(192, 168, 11, 0), 24),
+                (Ipv4Addr::new(172, 16, 0, 0), 12),
+            ]
         );
+        let hosts: Vec<_> = s.endpoints.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, vec!["a.example", "b.example"]);
     }
 }

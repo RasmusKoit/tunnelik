@@ -112,6 +112,31 @@ mod commands {
         blocking(move || manage::disconnect(&name)).await
     }
 
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct LivePeer {
+        public_key: String,
+        last_handshake_secs_ago: Option<u64>,
+        rx_bytes: u64,
+        tx_bytes: u64,
+    }
+
+    /// Handshake age and bytes per peer while `name` is connected; null otherwise.
+    #[tauri::command]
+    pub fn tunnel_live(name: String) -> Option<Vec<LivePeer>> {
+        manage::live(&name).map(|peers| {
+            peers
+                .into_iter()
+                .map(|p| LivePeer {
+                    public_key: p.public_key,
+                    last_handshake_secs_ago: p.last_handshake_secs_ago,
+                    rx_bytes: p.rx_bytes,
+                    tx_bytes: p.tx_bytes,
+                })
+                .collect()
+        })
+    }
+
     /// Recreates VPN connections Windows dropped, e.g. when the package was reinstalled.
     #[tauri::command]
     pub async fn repair_profiles() -> Result<Vec<String>, String> {
@@ -147,6 +172,7 @@ fn main() {
             list_tunnels,
             read_tunnel,
             tunnel_details,
+            tunnel_live,
             save_tunnel,
             remove_tunnel,
             connect,

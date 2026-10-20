@@ -4,6 +4,7 @@
 //! plugin connects. `vpn` holds the Windows side; `profile`, `settings` and `tunnel` are plain
 //! Rust and tested anywhere.
 
+pub mod live;
 pub mod profile;
 pub mod settings;
 pub mod tunnel;

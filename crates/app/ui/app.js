@@ -150,6 +150,7 @@ async function refresh() {
   }
   renderAll();
   setButtons();
+  await refreshLive();
 }
 
 // ---- Overview ----
@@ -192,6 +193,8 @@ function renderInterface() {
   ui.toggle.disabled = busy || state === "connecting";
 }
 
+let live = null;          // per-peer counters while the selected tunnel is connected
+
 function renderPeers() {
   ui.dPeers.replaceChildren(...details.peers.map((p) => {
     const card = document.createElement("div");
@@ -201,25 +204,61 @@ function renderPeers() {
     title.textContent = "Peer";
     const dl = document.createElement("dl");
     dl.className = "fields";
+    const now = live && live.find((l) => l.publicKey === p.publicKey);
     fields(dl, [
       ["Public key", p.publicKey, true],
       ["Preshared key", p.hasPresharedKey ? "enabled" : null],
       ["Allowed IPs", p.allowedIps],
       ["Endpoint", p.endpoint],
       ["Persistent keepalive", p.persistentKeepalive ? `every ${p.persistentKeepalive} seconds` : null],
+      ["Latest handshake", now ? ago(now.lastHandshakeSecsAgo) : null],
+      ["Transfer", now ? `${bytes(now.rxBytes)} received, ${bytes(now.txBytes)} sent` : null],
     ]);
     card.append(title, dl);
     return card;
   }));
 }
 
+function ago(secs) {
+  if (secs == null) return "none yet";
+  const parts = [];
+  for (const [unit, size] of [["hour", 3600], ["minute", 60], ["second", 1]]) {
+    const n = Math.floor(secs / size);
+    secs -= n * size;
+    if (n || (unit === "second" && !parts.length)) parts.push(`${n} ${unit}${n === 1 ? "" : "s"}`);
+  }
+  return parts.join(", ") + " ago";
+}
+
+function bytes(n) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return i === 0 ? `${n} B` : `${n.toFixed(2)} ${units[i]}`;
+}
+
+/// Fetches the plugin's latest counters for the open tunnel, and redraws the peers if they
+/// changed. Cheap: it reads a small file the plugin rewrites every 2 seconds.
+async function refreshLive() {
+  if (!details || ui.details.hidden) return;
+  const next = stateOf(current()) === "connected"
+    ? await invoke("tunnel_live", { name: selected }).catch(() => null)
+    : null;
+  if (JSON.stringify(next) !== JSON.stringify(live)) {
+    live = next;
+    renderPeers();
+  }
+}
+
 async function loadDetails(name) {
   details = await invoke("tunnel_details", { name });
   selected = name;
+  live = null;
   show("details");
   renderInterface();
   renderPeers();
   renderList();
+  await refreshLive();
 }
 
 function open(name) {
