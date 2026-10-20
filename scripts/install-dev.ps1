@@ -9,7 +9,7 @@ param([switch]$Debug)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 $profileName = if ($Debug) { 'debug' } else { 'release' }
-$out = Join-Path $root 'target\package'
+$out = Join-Path $root 'target\appx'
 
 $buildArgs = @('build', '--manifest-path', "$root\Cargo.toml", '-p', 'tunnelik-host', '-p', 'tunnelik-plugin', '-p', 'tunnelik-cli', '-p', 'tunnelik-app')
 if (-not $Debug) { $buildArgs += '--release' }
@@ -44,6 +44,6 @@ icacls $out /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'granting app packages access to the package folder failed' }
 
 Add-AppxPackage -Register "$out\AppxManifest.xml" -ForceApplicationShutdown -ForceUpdateFromAnyVersion
-$installed = Get-AppxPackage -Name Tunnelik
+$installed = Get-AppxPackage -Name RasmusKoit.Tunnelik
 Write-Host "Installed $($installed.PackageFullName)"
 Write-Host "Open Tunnelik from the Start menu, or run: tunnelik add <name> <file.conf>"

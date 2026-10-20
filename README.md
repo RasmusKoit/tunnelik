@@ -49,7 +49,7 @@ Turn on **Settings → System → For developers → Developer Mode**.
 ```
 
 Or connect **Home** from Settings → Network & internet → VPN. The plugin logs to
-`%LOCALAPPDATA%\Packages\Tunnelik_<id>\LocalState\plugin.log`.
+`%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
 
 Limitations for now: one `[Peer]` per tunnel.
 

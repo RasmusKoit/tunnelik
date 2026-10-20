@@ -11,7 +11,7 @@ use std::process::Command;
 use tunnelik_plugin::{profile, settings, store};
 
 /// Package name from package/AppxManifest.xml.
-pub const PACKAGE_NAME: &str = "Tunnelik";
+pub const PACKAGE_NAME: &str = "RasmusKoit.Tunnelik";
 /// Application id of the config editor in package/AppxManifest.xml.
 pub const APP_ID: &str = "App";
 
