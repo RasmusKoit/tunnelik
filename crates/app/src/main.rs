@@ -54,6 +54,7 @@ mod commands {
         dns_search: Vec<String>,
         mtu: Option<u16>,
         keep_awake: bool,
+        always_on: bool,
         peers: Vec<Peer>,
     }
 
@@ -80,6 +81,7 @@ mod commands {
                 dns_search: d.dns_search,
                 mtu: d.mtu,
                 keep_awake: d.keep_awake,
+                always_on: d.always_on,
                 peers: d
                     .peers
                     .into_iter()
@@ -110,6 +112,12 @@ mod commands {
     #[tauri::command]
     pub async fn set_keep_awake(name: String, enabled: bool) -> Result<(), String> {
         blocking(move || manage::set_keep_awake(&name, enabled)).await
+    }
+
+    /// Switches whether Windows brings `name` up by itself at sign-in and after a drop.
+    #[tauri::command]
+    pub async fn set_always_on(name: String, enabled: bool) -> Result<(), String> {
+        blocking(move || manage::set_always_on(&name, enabled)).await
     }
 
     #[tauri::command]
@@ -196,6 +204,7 @@ fn main() {
             save_tunnel,
             remove_tunnel,
             set_keep_awake,
+            set_always_on,
             connect,
             disconnect,
             open_link,

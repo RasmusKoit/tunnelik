@@ -11,6 +11,7 @@ const USAGE: &str = "usage:
   tunnelik down <name>              disconnect
   tunnelik list                     list tunnels and whether they are connected
   tunnelik keep-awake <name> on|off keep the PC awake while the tunnel is busy
+  tunnelik always-on <name> on|off  let Windows connect it at sign-in and after it was dropped
   tunnelik repair                   recreate missing VPN connections, e.g. after a reinstall";
 
 #[cfg(windows)]
@@ -36,14 +37,31 @@ fn main() -> ExitCode {
                 println!("No tunnels yet. Add one with: tunnelik add <name> <file.conf>");
             }
             for t in tunnels {
-                let note = if t.keep_awake {
-                    "   keeps the PC awake while busy"
+                let mut notes = Vec::new();
+                if t.always_on {
+                    notes.push("always on");
+                }
+                if t.keep_awake {
+                    notes.push("keeps the PC awake while busy");
+                }
+                let note = if notes.is_empty() {
+                    String::new()
                 } else {
-                    ""
+                    format!("   {}", notes.join(", "))
                 };
                 println!("{:<24} {}{note}", t.name, t.state.as_str());
             }
         }),
+        ["always-on", name, switch @ ("on" | "off")] => {
+            let enabled = *switch == "on";
+            manage::set_always_on(name, enabled).map(|()| {
+                if enabled {
+                    println!("Windows now connects `{name}` at sign-in and after it was dropped.");
+                } else {
+                    println!("`{name}` is no longer always on.");
+                }
+            })
+        }
         ["keep-awake", name, switch @ ("on" | "off")] => {
             let enabled = *switch == "on";
             manage::set_keep_awake(name, enabled).map(|()| {
@@ -58,7 +76,7 @@ fn main() -> ExitCode {
             if names.is_empty() {
                 println!("Every tunnel has its VPN connection; nothing to repair.");
             } else {
-                println!("Recreated the VPN connection for: {}", names.join(", "));
+                println!("Created the VPN connection for: {}", names.join(", "));
             }
         }),
         ["-h" | "--help" | "help"] => {

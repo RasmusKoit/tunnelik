@@ -37,10 +37,11 @@ use windows_core::{
 use windows::Foundation::{IReference, PropertyValue};
 
 use crate::activity::Activity;
+use crate::markers::{self, Marker};
 use crate::power::KeepAwake;
 use crate::tunnel::Tunnel;
 use crate::winrt::{Context, E_FAIL, host_names, read_buffer, write_buffer};
-use crate::{live, options, profile, settings, store};
+use crate::{live, notify, options, profile, settings, store};
 use wgconf::Endpoint;
 
 /// Class name the package manifest registers for the background task.
@@ -621,6 +622,17 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     }
     session.started.store(true, Ordering::Relaxed);
     log(channel, "connected");
+
+    // A connect nobody asked for is Windows' always-on bringing the tunnel back: say so.
+    if let Ok(dir) = local_state() {
+        let asked = markers::take(&dir, &session.name, Marker::Dialing);
+        if options.always_on && !asked {
+            match notify::show(&session.name) {
+                Ok(()) => file_log("told the user the tunnel is back up"),
+                Err(e) => file_log(&format!("showing the toast failed: {}", e.message())),
+            }
+        }
+    }
 
     // Switching networks (Wi-Fi to Ethernet, another hotspot) silently strands the sockets on
     // the old network. Windows keeps showing the VPN as connected, so we watch for it.

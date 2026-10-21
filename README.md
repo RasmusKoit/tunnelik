@@ -9,7 +9,7 @@
 Add a tunnel once, from the same `.conf` the official apps use.<br>
 From then on it is just another VPN to Windows.
 
-[![Latest release](https://img.shields.io/github/v/release/RasmusKoit/tunnelik?include_prereleases&label=release&color=0e7490)](https://github.com/RasmusKoit/tunnelik/releases/latest) [![Downloads](https://img.shields.io/github/downloads/RasmusKoit/tunnelik/total?color=0e7490)](https://github.com/RasmusKoit/tunnelik/releases) [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-blue)](#license) [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D4)](#install)
+[![Latest release](https://img.shields.io/github/v/release/RasmusKoit/tunnelik?include_prereleases&label=release&color=0e7490)](https://github.com/RasmusKoit/tunnelik/releases/latest) [![Downloads](https://img.shields.io/github/downloads/RasmusKoit/tunnelik/total?color=0e7490)](https://github.com/RasmusKoit/tunnelik/releases) [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-blue)](#license) [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D4)](#install) [![CI](https://github.com/RasmusKoit/tunnelik/actions/workflows/ci.yml/badge.svg)](https://github.com/RasmusKoit/tunnelik/actions/workflows/ci.yml)
 
 [Install](#install) · [Use](#use) · [How it works](#how-it-works) · [Build](#build) · [License](#license)
 
@@ -54,7 +54,7 @@ Configs are encrypted with DPAPI for your Windows user. The overview never shows
 <td width="33%" valign="top">
 
 ### 🔁 Stays up
-Survives lock and short naps, rekeys on schedule, and reconnects by itself within about five seconds when you switch networks. A per-tunnel option keeps the PC out of sleep while the tunnel is busy.
+Rekeys on schedule and reconnects by itself within seconds when you switch networks. Per tunnel: **always on**, so Windows redials it after standby and at sign-in, and **keep the PC awake** while it is busy.
 
 </td>
 <td width="33%" valign="top">
@@ -106,6 +106,7 @@ The same from a terminal:
 | `tunnelik add <name> <file.conf>` | Adds a tunnel, or replaces its config |
 | `tunnelik up <name>` / `tunnelik down <name>` | Connects / disconnects |
 | `tunnelik list` | Lists tunnels and their state |
+| `tunnelik always-on <name> on\|off` | Lets Windows connect it at sign-in and after it was dropped (see below) |
 | `tunnelik keep-awake <name> on\|off` | Keeps the PC awake while the tunnel is busy (see below) |
 | `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
 | `tunnelik repair` | Recreates VPN profiles Windows dropped (see below) |
@@ -114,11 +115,20 @@ The same from a terminal:
 > Windows runs **one connection per VPN plugin**, so connecting a tunnel disconnects any other
 > Tunnelik tunnel.
 
-### Keeping the PC awake
+### Always on
 
 A laptop left alone goes into Modern Standby on its idle timer, and some minutes into standby
-Windows hangs up every VPN, Tunnelik's included. Tick **Keep this PC awake while the tunnel is
-busy** on a tunnel (or run `tunnelik keep-awake <name> on`) and the plugin holds a
+Windows hangs up every VPN, Tunnelik's included. Tick **Always on** on a tunnel (or run
+`tunnelik always-on <name> on`) and Windows itself brings it back: at sign-in, and again after
+standby or a network change dropped it, with a toast when it does. This is Windows' own Always On
+VPN, set on the tunnel's profile, so it behaves like any other always-on VPN: turning the tunnel
+off yourself, in Tunnelik, Settings or the flyout, keeps it off until the next sign-in or network
+change.
+
+### Keeping the PC awake
+
+If a transfer must survive the night rather than resume after it, tick **Keep this PC awake while
+the tunnel is busy** (or run `tunnelik keep-awake <name> on`) and the plugin holds a
 system-required power request whenever more than about 64 KiB a minute goes through the tunnel,
 the same thing a media player does while it plays. The screen still turns off and the lock screen
 still comes on; only the step into sleep waits until the tunnel has been quiet for a minute.
@@ -135,6 +145,10 @@ it is held.
   downloads). Pings and new connections carry on.
 - Windows **deletes a plugin's VPN profiles** when the package is uninstalled. The configs
   survive; `tunnelik repair` (which the window also runs when it opens) brings the profiles back.
+- Tunnelik's profiles live in the **package's own phonebook**, through Windows' VPN management
+  API. Settings and the flyout show them; `Get-VpnConnection` and `rasdial` don't. Tunnels made
+  with versions before 0.3 are moved over by `tunnelik repair` the first time they are seen
+  disconnected.
 - `PreUp`/`PostUp` scripts and `Table = off` are refused rather than ignored; everything else in
   a `wg-quick` config is understood.
 - The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
@@ -163,8 +177,10 @@ WireGuard protocol and a timer thread for handshakes and keepalives.
      encrypted tunnel store  (DPAPI, per Windows user)
 ```
 
-A VPN profile in Windows holds nothing but the tunnel's name. The config itself lives, encrypted,
-in the package's data folder, where only the same Windows user can read it.
+A VPN profile in Windows holds nothing but the tunnel's name; Tunnelik keeps it in the package's
+own phonebook through Windows' VPN management API, which is also where always-on is set. The
+config itself lives, encrypted, in the package's data folder, where only the same Windows user
+can read it.
 
 <details>
 <summary><b>Repository layout</b></summary>

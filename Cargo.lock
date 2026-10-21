@@ -3831,6 +3831,9 @@ dependencies = [
  "tunnelik-plugin",
  "wgconf",
  "windows",
+ "windows-collections",
+ "windows-core",
+ "windows-future",
 ]
 
 [[package]]

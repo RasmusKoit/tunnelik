@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! keep-awake = true
+//! always-on = false
 //! ```
 //!
 //! A tunnel without the file has the defaults. Unknown keys are kept out of the way rather than
@@ -22,10 +23,16 @@ pub struct Options {
     /// Hold the PC out of idle sleep while the tunnel carries traffic. The plugin decides what
     /// counts as traffic; see `BUSY_BYTES_PER_MINUTE` in `vpn`.
     pub keep_awake: bool,
+    /// A copy of the VPN profile's always-on flag, so the plugin can tell a redial by Windows
+    /// from one the user asked for. The profile is the truth; the tools keep this in step.
+    pub always_on: bool,
 }
 
 pub fn encode(options: &Options) -> String {
-    format!("keep-awake = {}\n", options.keep_awake)
+    format!(
+        "keep-awake = {}\nalways-on = {}\n",
+        options.keep_awake, options.always_on
+    )
 }
 
 pub fn decode(text: &str) -> Options {
@@ -34,8 +41,11 @@ pub fn decode(text: &str) -> Options {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if key.trim() == "keep-awake" {
-            options.keep_awake = value.trim() == "true";
+        let on = value.trim() == "true";
+        match key.trim() {
+            "keep-awake" => options.keep_awake = on,
+            "always-on" => options.always_on = on,
+            _ => {}
         }
     }
     options
@@ -80,8 +90,13 @@ mod tests {
     #[test]
     fn round_trips() {
         for keep_awake in [false, true] {
-            let options = Options { keep_awake };
-            assert_eq!(decode(&encode(&options)), options);
+            for always_on in [false, true] {
+                let options = Options {
+                    keep_awake,
+                    always_on,
+                };
+                assert_eq!(decode(&encode(&options)), options);
+            }
         }
     }
 
@@ -91,8 +106,13 @@ mod tests {
         assert_eq!(decode("keep-awake = yes\n"), Options::default());
         assert_eq!(
             decode("# comment\nfrom-the-future = 1\n keep-awake=true \r\n"),
-            Options { keep_awake: true }
+            Options {
+                keep_awake: true,
+                always_on: false
+            }
         );
+        // A file from before always-on existed.
+        assert!(!decode("keep-awake = true\n").always_on);
     }
 
     #[test]
@@ -100,9 +120,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tunnelik-options-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
+        let on = Options {
+            keep_awake: true,
+            always_on: false,
+        };
         assert_eq!(load(&dir, "Home").unwrap(), Options::default());
-        save(&dir, "Home", &Options { keep_awake: true }).unwrap();
-        assert_eq!(load(&dir, "Home").unwrap(), Options { keep_awake: true });
+        save(&dir, "Home", &on).unwrap();
+        assert_eq!(load(&dir, "Home").unwrap(), on);
         remove(&dir, "Home").unwrap();
         remove(&dir, "Home").unwrap();
         assert_eq!(load(&dir, "Home").unwrap(), Options::default());

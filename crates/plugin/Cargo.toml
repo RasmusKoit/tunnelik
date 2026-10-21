@@ -22,7 +22,9 @@ windows-core = "0.62"
 windows-collections = "0.3"
 windows-future = "0.3"
 windows = { version = "0.62", features = [
+    "ApplicationModel",
     "ApplicationModel_Background",
+    "Data_Xml_Dom",
     "Foundation_Collections",
     "Networking",
     "Networking_Connectivity",
@@ -32,6 +34,7 @@ windows = { version = "0.62", features = [
     "Storage",
     "Storage_Search",
     "Storage_Streams",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Power",

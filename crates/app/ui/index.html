@@ -35,6 +35,13 @@
         </label>
         <p class="hint">Holds off the idle sleep timer while more than about 64 KiB a minute goes
           through the tunnel. Closing the lid or pressing the power button still works.</p>
+        <label class="option">
+          <input id="always-on" type="checkbox">
+          <span>Always on: connect at sign-in, and again after Windows drops it</span>
+        </label>
+        <p class="hint">Windows brings the tunnel back after standby or a network change. Turning
+          it off here, in Settings or from the flyout keeps it off until the next sign-in or
+          network change.</p>
         <div class="card-actions">
           <button id="toggle" class="button primary"></button>
         </div>

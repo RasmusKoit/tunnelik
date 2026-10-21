@@ -6,6 +6,8 @@
 
 pub mod activity;
 pub mod live;
+pub mod markers;
+pub mod notify;
 pub mod options;
 pub mod profile;
 pub mod settings;
