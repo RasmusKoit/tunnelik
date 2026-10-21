@@ -3934,7 +3934,7 @@ name = "tunnelik-plugin"
 version = "0.1.0"
 dependencies = [
  "boringtun",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "wgconf",
  "windows",
  "windows-collections",
