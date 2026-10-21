@@ -30,13 +30,18 @@ pub struct Options {
     pub app_triggers: Vec<String>,
     /// DNS suffixes a lookup under which makes Windows dial the tunnel, without a leading dot.
     pub dns_triggers: Vec<String>,
+    /// Address ranges (`10.0.0.0/8`) a program's first connection into which makes Tunnelik's
+    /// own watcher dial the tunnel; canonical, as `subnet::Subnet` prints them.
+    pub subnet_triggers: Vec<String>,
     /// Its VPN profile is the managed, machine-wide one Windows dials on its own. Windows keeps
     /// such a profile always on itself, so the always-on task leaves it alone.
     pub managed: bool,
 }
 
 impl Options {
-    pub fn has_triggers(&self) -> bool {
+    /// Triggers Windows itself watches for, which take a managed profile; subnets are
+    /// Tunnelik's own and need none of that.
+    pub fn windows_triggers(&self) -> bool {
         !self.app_triggers.is_empty() || !self.dns_triggers.is_empty()
     }
 }
@@ -51,6 +56,9 @@ pub fn encode(options: &Options) -> String {
     }
     for dns in &options.dns_triggers {
         text.push_str(&format!("dns-trigger = {dns}\n"));
+    }
+    for subnet in &options.subnet_triggers {
+        text.push_str(&format!("subnet-trigger = {subnet}\n"));
     }
     if options.managed {
         text.push_str("managed = true\n");
@@ -71,6 +79,9 @@ pub fn decode(text: &str) -> Options {
             "always-on" => options.always_on = on,
             "app-trigger" if !value.is_empty() => options.app_triggers.push(value.to_string()),
             "dns-trigger" if !value.is_empty() => options.dns_triggers.push(value.to_string()),
+            "subnet-trigger" if !value.is_empty() => {
+                options.subnet_triggers.push(value.to_string())
+            }
             "managed" => options.managed = on,
             _ => {}
         }
@@ -123,13 +134,21 @@ mod tests {
                     always_on,
                     app_triggers: vec!["C:\\Program Files\\Some App\\app.exe".into()],
                     dns_triggers: vec!["corp.example".into(), "lab.example".into()],
+                    subnet_triggers: vec!["10.0.0.0/8".into(), "fd00::/64".into()],
                     managed: keep_awake,
                 };
                 assert_eq!(decode(&encode(&options)), options);
-                assert!(options.has_triggers());
+                assert!(options.windows_triggers());
             }
         }
-        assert!(!Options::default().has_triggers());
+        assert!(!Options::default().windows_triggers());
+        // Subnets are Tunnelik's own: no managed profile for them.
+        let subnets_only = Options {
+            subnet_triggers: vec!["10.0.0.0/8".into()],
+            ..Options::default()
+        };
+        assert!(!subnets_only.windows_triggers());
+        assert_eq!(decode(&encode(&subnets_only)), subnets_only);
     }
 
     #[test]

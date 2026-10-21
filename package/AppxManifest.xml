@@ -1,14 +1,15 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
   xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap5 desktop4 desktop6 rescap">
+  IgnorableNamespaces="uap uap5 desktop desktop4 desktop6 rescap">
 
-  <Identity Name="dev.koit.Tunnelik" Publisher="CN=Rasmus Koit" Version="0.3.8.0" ProcessorArchitecture="x64" />
+  <Identity Name="dev.koit.Tunnelik" Publisher="CN=Rasmus Koit" Version="0.3.11.0" ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Tunnelik</DisplayName>
@@ -34,7 +35,7 @@
       desktop4:SupportsMultipleInstances="true">
       <uap:VisualElements
         DisplayName="Tunnelik"
-        Description="A client for WireGuard®"
+        Description="A client for WireGuardÂ®"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"
         BackgroundColor="transparent" />
@@ -64,6 +65,14 @@
         <desktop6:Extension Category="windows.service" Executable="tunnelik_svc.exe" EntryPoint="Windows.FullTrustApplication">
           <desktop6:Service Name="TunnelikMdm" StartupType="manual" StartAccount="localSystem" />
         </desktop6:Extension>
+        <!--
+          Subnet triggers are Tunnelik's own: this watcher, started at sign-in, dials a tunnel
+          when a program first tries to reach one of its address ranges. It exits when no tunnel
+          has one. Settings > Apps > Startup lists it, where the user can switch it off.
+        -->
+        <desktop:Extension Category="windows.startupTask" Executable="tunnelik_watch.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="TunnelikWatch" Enabled="true" DisplayName="Tunnelik" />
+        </desktop:Extension>
       </Extensions>
     </Application>
 

@@ -13,10 +13,11 @@ const USAGE: &str = "usage:
   tunnelik keep-awake <name> on|off keep the PC awake while the tunnel is busy
   tunnelik always-on <name> on|off  bring it back after Windows drops it, and at sign-in
   tunnelik always-on <name>         show whether it is always on, and the task's events
-  tunnelik trigger <name>           list the programs and DNS suffixes that start it
+  tunnelik trigger <name>           list the programs, DNS suffixes and subnets that start it
   tunnelik trigger <name> app <path.exe>    start it when that program runs
   tunnelik trigger <name> dns <suffix>      start it when a name under that suffix is looked up
-  tunnelik trigger <name> remove <path-or-suffix>
+  tunnelik trigger <name> subnet <cidr>     start it when a program first reaches that range
+  tunnelik trigger <name> remove <path-suffix-or-cidr>
   tunnelik trigger enable|disable   turn the feature on or off (administrator approval)
   tunnelik repair                   recreate missing VPN connections, e.g. after a reinstall";
 
@@ -105,7 +106,7 @@ fn main() -> ExitCode {
             if !t.enabled {
                 println!("\"Start on its own\" is off; turn it on with `tunnelik trigger enable`.");
             }
-            if t.apps.is_empty() && t.dns.is_empty() {
+            if t.apps.is_empty() && t.dns.is_empty() && t.subnets.is_empty() {
                 println!("Nothing starts `{name}` on its own.");
             }
             if let Some(holder) = &t.elsewhere {
@@ -117,17 +118,29 @@ fn main() -> ExitCode {
             for dns in &t.dns {
                 println!("dns      {dns}");
             }
+            for subnet in &t.subnets {
+                println!("subnet   {subnet}");
+            }
         }),
         ["trigger", name, "app", program] => manage::add_app_trigger(name, program)
             .map(|()| println!("Starting `{program}` now connects `{name}`.")),
         ["trigger", name, "dns", suffix] => manage::add_dns_trigger(name, suffix)
             .map(|()| println!("Looking up a name under `{suffix}` now connects `{name}`.")),
+        ["trigger", name, "subnet", cidr] => manage::add_subnet_trigger(name, cidr).map(|()| {
+            println!("A program reaching an address in `{cidr}` now connects `{name}` (TCP only).")
+        }),
         ["trigger", name, "remove", value] => manage::triggers(name)
             .and_then(|t| {
                 if t.apps.iter().any(|a| a.eq_ignore_ascii_case(value)) {
                     manage::remove_app_trigger(name, value)
                 } else if t.dns.iter().any(|d| d.eq_ignore_ascii_case(value)) {
                     manage::remove_dns_trigger(name, value)
+                } else if t.subnets.iter().any(|s| s == value.trim())
+                    || t.subnets.iter().any(|s| {
+                        tunnelik_manage::canonical_subnet(value).as_deref() == Some(s.as_str())
+                    })
+                {
+                    manage::remove_subnet_trigger(name, value)
                 } else {
                     Err(format!("`{name}` has no trigger `{value}`"))
                 }

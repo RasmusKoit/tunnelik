@@ -12,6 +12,7 @@ pub mod notify;
 pub mod options;
 pub mod profile;
 pub mod settings;
+pub mod subnet;
 pub mod tunnel;
 
 #[cfg(windows)]

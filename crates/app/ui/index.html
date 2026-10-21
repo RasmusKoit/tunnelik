@@ -75,6 +75,18 @@
           <span class="spacer"></span>
           <button id="triggers-stop" class="linkish" title="Stops the helper service; tunnels keep their lists but no longer start on their own">Turn off</button>
         </div>
+        <!-- Tunnelik's own trigger, no service or managed profile involved: a watcher Windows
+             starts at sign-in reads the TCP table for connections headed into these ranges. -->
+        <p class="hint hint-lead group-lead">Tunnelik itself connects this tunnel when a program
+          first tries to reach one of these ranges. It sees TCP connections only; ping and UDP
+          do not count. The attempt that starts the tunnel still fails, the program's next try
+          goes through. After you disconnect the tunnel yourself it stays down for ten
+          minutes.</p>
+        <ul id="d-subnets" class="triggers" aria-label="Subnets"></ul>
+        <div class="trigger-add">
+          <input id="subnet-cidr" class="field" placeholder="10.0.0.0/8" spellcheck="false" autocomplete="off">
+          <button id="add-subnet" class="button">Add subnet</button>
+        </div>
       </div>
       <div id="d-peers" class="peers"></div>
       <div class="details-foot">

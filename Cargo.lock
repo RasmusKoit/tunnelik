@@ -3953,6 +3953,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tunnelik-watch"
+version = "0.1.0"
+dependencies = [
+ "tunnelik-manage",
+ "tunnelik-plugin",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

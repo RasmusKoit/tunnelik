@@ -11,6 +11,7 @@ const ui = {
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
   toggle: $("toggle"), edit: $("edit"), del: $("delete"), keepAwake: $("keep-awake"), alwaysOn: $("always-on"),
   dApps: $("d-apps"), dDns: $("d-dns"), addApp: $("add-app"), addDns: $("add-dns"), dnsSuffix: $("dns-suffix"),
+  dSubnets: $("d-subnets"), addSubnet: $("add-subnet"), subnetCidr: $("subnet-cidr"),
   triggersElsewhere: $("triggers-elsewhere"), triggersOff: $("triggers-off"), triggersOn: $("triggers-on"),
   triggersStop: $("triggers-stop"),
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
@@ -241,6 +242,10 @@ function renderTriggers() {
   ui.dDns.replaceChildren(...t.dns.map((suffix) => triggerRow(
     suffix, "this name and any under it",
     () => invoke("remove_dns_trigger", { name: selected, suffix }))));
+  // Subnets are Tunnelik's own and need nothing turned on.
+  ui.dSubnets.replaceChildren(...t.subnets.map((cidr) => triggerRow(
+    cidr, "when a program first reaches this range",
+    () => invoke("remove_subnet_trigger", { name: selected, cidr }))));
 }
 
 let live = null;          // the plugin's status while the selected tunnel is connected
@@ -333,6 +338,7 @@ function setButtons() {
   const elsewhere = !!details?.triggers?.elsewhere;
   ui.addApp.disabled = busy || elsewhere;
   ui.addDns.disabled = busy || elsewhere || !ui.dnsSuffix.value.trim();
+  ui.addSubnet.disabled = busy || !ui.subnetCidr.value.trim();
   ui.triggersOn.disabled = busy;
   ui.triggersStop.disabled = busy;
   // The rows are rendered while a change is still in flight, so they follow `busy` from here.
@@ -533,6 +539,15 @@ ui.addDns.onclick = () => run(async () => {
   if (!suffix) return;
   await invoke("add_dns_trigger", { name: selected, suffix });
   ui.dnsSuffix.value = "";
+  await loadDetails(selected);
+});
+ui.subnetCidr.oninput = setButtons;
+ui.subnetCidr.onkeydown = (e) => { if (e.key === "Enter" && !ui.addSubnet.disabled) ui.addSubnet.click(); };
+ui.addSubnet.onclick = () => run(async () => {
+  const cidr = ui.subnetCidr.value.trim();
+  if (!cidr) return;
+  await invoke("add_subnet_trigger", { name: selected, cidr });
+  ui.subnetCidr.value = "";
   await loadDetails(selected);
 });
 

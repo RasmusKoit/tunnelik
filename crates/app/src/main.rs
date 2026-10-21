@@ -65,6 +65,7 @@ mod commands {
     pub struct Triggers {
         apps: Vec<String>,
         dns: Vec<String>,
+        subnets: Vec<String>,
         elsewhere: Option<String>,
         enabled: bool,
     }
@@ -96,6 +97,7 @@ mod commands {
                 triggers: Triggers {
                     apps: d.triggers.apps,
                     dns: d.triggers.dns,
+                    subnets: d.triggers.subnets,
                     elsewhere: d.triggers.elsewhere,
                     enabled: d.triggers.enabled,
                 },
@@ -174,6 +176,16 @@ mod commands {
     #[tauri::command]
     pub async fn remove_dns_trigger(name: String, suffix: String) -> Result<(), String> {
         blocking(move || manage::remove_dns_trigger(&name, &suffix)).await
+    }
+
+    #[tauri::command]
+    pub async fn add_subnet_trigger(name: String, cidr: String) -> Result<(), String> {
+        blocking(move || manage::add_subnet_trigger(&name, &cidr)).await
+    }
+
+    #[tauri::command]
+    pub async fn remove_subnet_trigger(name: String, cidr: String) -> Result<(), String> {
+        blocking(move || manage::remove_subnet_trigger(&name, &cidr)).await
     }
 
     #[tauri::command]
@@ -289,6 +301,8 @@ fn main() {
             set_always_on,
             pick_program,
             enable_triggers,
+            add_subnet_trigger,
+            remove_subnet_trigger,
             add_app_trigger,
             remove_app_trigger,
             add_dns_trigger,

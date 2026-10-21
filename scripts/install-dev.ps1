@@ -40,7 +40,7 @@ $version = '0.0.{0}.{1}' -f [int][math]::Floor(($now - [datetime]'2026-01-01').T
 $manifest.Package.Identity.Version = $version
 $manifest.Save("$out\AppxManifest.xml")
 Copy-Item -Recurse -Force "$root\package\Assets" $out
-foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe', 'tunnelik_svc.exe') {
+foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe', 'tunnelik_svc.exe', 'tunnelik_watch.exe') {
     Copy-Item -Force "$root\target\$profileName\$file" $out
 }
 Copy-Item -Force "$root\README.md", "$root\LICENSE-MIT", "$root\LICENSE-APACHE", "$root\THIRD_PARTY_NOTICES.md" $out -ErrorAction SilentlyContinue

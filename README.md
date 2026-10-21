@@ -112,6 +112,7 @@ The same from a terminal:
 | `tunnelik always-on <name> on\|off` | Brings it back after Windows drops it, and at sign-in (see below) |
 | `tunnelik keep-awake <name> on\|off` | Keeps the PC awake while the tunnel is busy (see below) |
 | `tunnelik trigger <name> app <path.exe>` / `dns <suffix>` | Starts the tunnel when that program runs, or a name under that domain is looked up |
+| `tunnelik trigger <name> subnet <cidr>` | Starts the tunnel when a program first tries to reach an address in that range (Tunnelik's own watcher) |
 | `tunnelik trigger <name>` / `tunnelik trigger <name> remove <value>` | Lists or removes those |
 | `tunnelik trigger enable\|disable` | Turns "start on its own" on or off (administrator approval) |
 | `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
@@ -159,6 +160,21 @@ before the tunnel is up, so the first one may fail; Tunnelik shows a toast when 
 up. And names under a trigger domain are resolved through the tunnel's DNS servers (the
 `DNS =` line of the config), which keeps internal names working; a browser with its own secure
 DNS never reaches the Windows resolver and so never triggers anything.
+
+### Subnets
+
+Windows has no trigger for an address range, so that one is Tunnelik's own. Add `10.0.0.0/8`
+under **Tunnelik itself connects this tunnel** (or `tunnelik trigger <name> subnet 10.0.0.0/8`)
+and a small watcher, `tunnelik_watch.exe`, reads the system's TCP table once a second for
+connections a program is trying to open into that range and dials the tunnel for the first one.
+The tunnel is up a second or two later; the attempt that triggered it still fails, since Windows
+keeps that connection on the route it chose, and the program's next try goes through. A toast
+says which program reached what. It sees TCP only: `ping` and UDP leave nothing to see. After you
+disconnect the tunnel yourself it stays down for ten minutes, and a tunnel Windows or the
+flyout just dropped is left alone for two, like always-on does. Nothing needs turning on and
+the profile stays an ordinary one. Windows starts the watcher at sign-in (Settings > Apps >
+Startup lists it as Tunnelik, where it can be switched off); it exits by itself when no tunnel
+has a subnet, and the window or the command starts it again when one is added.
 
 ### Keeping the PC awake
 

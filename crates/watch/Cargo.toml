@@ -1,0 +1,24 @@
+[package]
+name = "tunnelik-watch"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "Starts a tunnel when a program first tries to reach one of its subnets"
+
+[[bin]]
+name = "tunnelik_watch"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+tunnelik-manage = { path = "../manage" }
+tunnelik-plugin = { path = "../plugin" }
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+] }

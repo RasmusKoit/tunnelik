@@ -16,7 +16,7 @@ use std::process::Command;
 mod mdm;
 
 use tunnelik_plugin::markers::{self, Marker};
-use tunnelik_plugin::{options, profile, settings, store};
+use tunnelik_plugin::{options, profile, settings, store, subnet};
 use windows::ApplicationModel::Background::{
     BackgroundAccessStatus, BackgroundExecutionManager, BackgroundTaskBuilder,
     BackgroundTaskRegistration, IBackgroundTaskRegistration, SystemTrigger, SystemTriggerType,
@@ -356,7 +356,7 @@ pub fn repair() -> Result<Vec<String>, String> {
         }
         let options = options::load(&dir, &name).unwrap_or_default();
         let in_phonebook = existing.iter().any(|e| e.eq_ignore_ascii_case(&name));
-        if options.has_triggers() {
+        if options.windows_triggers() {
             // A tunnel that starts on its own lives in a managed profile; an ordinary one in
             // its way, or a missing managed one, gets put right.
             if in_phonebook || !managed_exists(&name)? {
@@ -438,7 +438,7 @@ fn rebuild_profile(name: &str, mut options: options::Options) -> Result<(), Stri
     }
     let before = options::load(&dir, name)?;
     let (host, full_tunnel, dns) = tunnel_server(name)?;
-    if options.has_triggers() {
+    if options.windows_triggers() {
         remove_profile(name, &package_family()?)?;
         apply_managed(name, &host, &dns, &options)?;
         options.managed = true;
@@ -564,7 +564,7 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
 
     // The VPN profile comes first: if the name already belongs to another VPN, nothing gets
     // saved.
-    let created = if options.has_triggers() {
+    let created = if options.windows_triggers() {
         // The managed profile only shows the server as a label; refresh it when it can be.
         if state_of(&connections()?, name) == State::Disconnected {
             let dns: Vec<String> = s.dns_servers.iter().map(ToString::to_string).collect();
@@ -704,6 +704,8 @@ pub struct Triggers {
     pub apps: Vec<String>,
     /// DNS suffixes, lower case, without a leading dot.
     pub dns: Vec<String>,
+    /// Address ranges Tunnelik's own watcher dials the tunnel for, canonical (`10.0.0.0/8`).
+    pub subnets: Vec<String>,
     /// The other tunnel that holds the triggers, if one does.
     pub elsewhere: Option<String>,
     /// Whether the feature is turned on: the TunnelikMdm service is running.
@@ -717,6 +719,7 @@ pub fn triggers(name: &str) -> Result<Triggers, String> {
     Ok(Triggers {
         apps: options.app_triggers,
         dns: options.dns_triggers,
+        subnets: options.subnet_triggers,
         elsewhere: trigger_holder(&dir).filter(|h| !h.eq_ignore_ascii_case(name)),
         enabled: triggers_enabled(),
     })
@@ -775,7 +778,7 @@ pub fn enable_triggers(enabled: bool) -> Result<(), String> {
 fn trigger_holder(dir: &std::path::Path) -> Option<String> {
     store::list(dir)
         .into_iter()
-        .find(|n| options::load(dir, n).is_ok_and(|o| o.has_triggers()))
+        .find(|n| options::load(dir, n).is_ok_and(|o| o.windows_triggers()))
 }
 
 /// Makes starting `program` bring `name` up. The path must point at an existing `.exe`.
@@ -821,17 +824,125 @@ pub fn remove_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
     set_triggers(name, options)
 }
 
+/// Makes a program's first connection into `cidr` bring `name` up. That is Tunnelik's own
+/// watcher, not Windows, so the profile stays as it is and nothing needs turning on; the
+/// watcher is started right away, and by Windows at every sign-in.
+pub fn add_subnet_trigger(name: &str, cidr: &str) -> Result<(), String> {
+    ensure_exists(name)?;
+    let subnet = subnet::Subnet::parse(cidr)?.to_string();
+    let dir = local_state()?;
+    let mut options = options::load(&dir, name)?;
+    if !options.subnet_triggers.contains(&subnet) {
+        options.subnet_triggers.push(subnet);
+    }
+    options::save(&dir, name, &options)?;
+    ensure_watcher()
+}
+
+pub fn remove_subnet_trigger(name: &str, cidr: &str) -> Result<(), String> {
+    ensure_exists(name)?;
+    // Stored values are canonical; a parseable input is compared canonically, anything else
+    // as typed, so whatever got stored stays removable.
+    let subnet =
+        subnet::Subnet::parse(cidr).map_or_else(|_| cidr.trim().to_string(), |s| s.to_string());
+    let dir = local_state()?;
+    let mut options = options::load(&dir, name)?;
+    options.subnet_triggers.retain(|s| *s != subnet);
+    options::save(&dir, name, &options)
+}
+
+/// `10.0.0.0/8` for anything that parses as a subnet, for matching against stored ones.
+pub fn canonical_subnet(text: &str) -> Option<String> {
+    subnet::Subnet::parse(text).ok().map(|s| s.to_string())
+}
+
+/// Starts the watcher that dials tunnels for subnet triggers, unless one is running already:
+/// it holds a named mutex, and a second copy exits at once.
+pub fn ensure_watcher() -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    use windows_core::PWSTR;
+
+    let exe = package_folder()?.join("tunnelik_watch.exe");
+    // Without package identity (the development build of `tunnelik`), a file under WindowsApps
+    // cannot be started directly; Windows' own cmdlet starts it inside the package.
+    if windows::ApplicationModel::Package::Current().is_err() {
+        return powershell(
+            "Invoke-CommandInDesktopPackage -PackageFamilyName $env:TUNNELIK_FAMILY -AppId App -PreventBreakaway -Command $env:TUNNELIK_EXE",
+            &[
+                ("TUNNELIK_FAMILY", &package_family()?),
+                ("TUNNELIK_EXE", &exe.to_string_lossy()),
+            ],
+        )
+        .map(|_| ());
+    }
+    // Through CreateProcess with handle inheritance off: `std::process::Command` always lets a
+    // child inherit the inheritable handles, so a `tunnelik` command run inside a pipeline
+    // would hand the watcher its output pipe, and the pipeline would wait for the watcher.
+    let mut command: Vec<u16> = std::ffi::OsStr::new(&format!("\"{}\"", exe.display()))
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: the command line is a writable, NUL-terminated buffer, as the call requires;
+    // the structs are initialised; the handles are closed right after.
+    unsafe {
+        CreateProcessW(
+            None,
+            Some(PWSTR(command.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            None,
+            None,
+            &startup,
+            &mut process,
+        )
+        .map_err(|e| format!("starting {}: {}", exe.display(), e.message()))?;
+        let _ = CloseHandle(process.hThread);
+        let _ = CloseHandle(process.hProcess);
+    }
+    Ok(())
+}
+
+/// Where the package's files are: asked of Windows directly when running with package
+/// identity, otherwise looked up by package name.
+fn package_folder() -> Result<PathBuf, String> {
+    if let Ok(path) = windows::ApplicationModel::Package::Current()
+        .and_then(|p| p.InstalledLocation())
+        .and_then(|f| f.Path())
+    {
+        return Ok(PathBuf::from(path.to_string()));
+    }
+    let path = powershell(
+        "(Get-AppxPackage -Name $env:TUNNELIK_PACKAGE).InstallLocation",
+        &[("TUNNELIK_PACKAGE", PACKAGE_NAME)],
+    )?;
+    if path.is_empty() {
+        return Err("the app package is not installed; run scripts\\install-dev.ps1 first".into());
+    }
+    Ok(PathBuf::from(path))
+}
+
 /// Saves a tunnel's new trigger list and rebuilds its VPN profile to match; see
 /// `rebuild_profile`.
 fn set_triggers(name: &str, options: options::Options) -> Result<(), String> {
     let dir = local_state()?;
-    if options.has_triggers() && !triggers_enabled() {
+    if options.windows_triggers() && !triggers_enabled() {
         return Err(
             "turn on \"Start on its own\" first; it needs administrator approval once, because Windows keeps such profiles system-wide"
                 .into(),
         );
     }
-    if options.has_triggers()
+    if options.windows_triggers()
         && let Some(holder) = trigger_holder(&dir).filter(|h| !h.eq_ignore_ascii_case(name))
     {
         return Err(format!(
@@ -928,7 +1039,7 @@ fn state_of(connections: &[(String, State)], name: &str) -> State {
 }
 
 /// All VPN connections Windows currently has open or is opening, with their state.
-fn connections() -> Result<Vec<(String, State)>, String> {
+pub fn connections() -> Result<Vec<(String, State)>, String> {
     use windows::Win32::NetworkManagement::Rras::{
         RASCONNSTATUSW, RASCONNW, RASCS_Connected, RASCS_Disconnected, RasEnumConnectionsW,
         RasGetConnectStatusW,
