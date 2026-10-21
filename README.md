@@ -137,7 +137,9 @@ minutes ago is left alone. `tunnelik always-on <name>` shows the task's registra
 Windows can also bring a tunnel up when you need it rather than keep it up: the **Start on its
 own** card lists programs and DNS domains that dial the tunnel. Add Remote Desktop, say, and the
 tunnel connects when you launch it; add `corp.example` and looking up any name under it connects
-the tunnel first. These are Windows' own VPN triggers.
+the tunnel first. These are Windows' own VPN triggers, and they watch programs and names only:
+Windows has no trigger for an address or a subnet, so Tunnelik refuses those instead of accepting
+something that would never fire.
 
 This one is **off until you turn it on**, because it touches the system: Windows only watches
 for a program or a name on behalf of a profile it was handed through its device-management

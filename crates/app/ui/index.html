@@ -51,8 +51,9 @@
       <div class="card">
         <h2 class="card-title">Start on its own</h2>
         <p class="hint hint-lead">Windows connects this tunnel when one of these programs starts,
-          or when a name under one of these domains is looked up. Windows watches for one tunnel
-          at a time, and the tunnel must be disconnected while this list changes.</p>
+          or when a name under one of these domains is looked up. It watches names, not
+          addresses or subnets. Windows watches for one tunnel at a time, and the tunnel must be
+          disconnected while this list changes.</p>
         <p id="triggers-elsewhere" class="hint hint-lead" hidden></p>
         <!-- Off by default: it starts a system service, so it asks before touching the system. -->
         <div id="triggers-off" class="trigger-add" hidden>

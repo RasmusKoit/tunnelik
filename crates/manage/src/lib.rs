@@ -600,6 +600,9 @@ fn remove_profile(name: &str, family: &str) -> Result<(), String> {
         $existing = Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
         if ($existing -and $existing.PlugInApplicationID -eq $env:TUNNELIK_FAMILY) {
             Remove-VpnConnection -Name $env:TUNNELIK_NAME -Force -ErrorAction Stop
+            'removed'
+        } else {
+            'absent'
         }
         "#,
         &[("TUNNELIK_NAME", name), ("TUNNELIK_FAMILY", family)],
@@ -761,7 +764,7 @@ pub fn add_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
 
 pub fn remove_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
     ensure_exists(name)?;
-    let suffix = validate_dns_suffix(suffix)?;
+    let suffix = normalize_dns_suffix(suffix);
     let mut options = options::load(&local_state()?, name)?;
     options.dns_triggers.retain(|d| *d != suffix);
     set_triggers(name, options)
@@ -828,9 +831,20 @@ fn validate_program_path(program: &str) -> Result<String, String> {
     Ok(program.to_string())
 }
 
+fn normalize_dns_suffix(suffix: &str) -> String {
+    suffix.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 /// A DNS suffix for a name trigger: `corp.example`, lower case, no spaces or shell characters.
+/// Addresses and subnets are refused outright: Windows triggers on name lookups only, so an
+/// address here would be accepted and never fire.
 fn validate_dns_suffix(suffix: &str) -> Result<String, String> {
-    let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
+    let suffix = normalize_dns_suffix(suffix);
+    if looks_like_address(&suffix) {
+        return Err(format!(
+            "`{suffix}` is an address; Windows can only start a tunnel for a program or a DNS name, not for an address or subnet. Use a domain like corp.example"
+        ));
+    }
     let ok = !suffix.is_empty()
         && suffix.split('.').all(|label| {
             !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -842,6 +856,13 @@ fn validate_dns_suffix(suffix: &str) -> Result<String, String> {
             "`{suffix}` is not a DNS suffix; use one like corp.example"
         ))
     }
+}
+
+/// An IPv4 or IPv6 address, with or without a `/prefix`.
+fn looks_like_address(text: &str) -> bool {
+    let host = text.split('/').next().unwrap_or("");
+    host.parse::<std::net::IpAddr>().is_ok()
+        || (host.split('.').count() == 4 && host.split('.').all(|l| l.parse::<u8>().is_ok()))
 }
 
 fn ensure_exists(name: &str) -> Result<(), String> {
@@ -986,7 +1007,12 @@ fn powershell(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("starting PowerShell: {e}"))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("PowerShell exited with {}", out.status)
+        } else {
+            err
+        });
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -1111,5 +1137,23 @@ mod tests {
         ] {
             assert!(validate_dns_suffix(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn refuses_addresses_as_dns_suffixes() {
+        for address in [
+            "10.0.0.100",
+            "10.0.0.0/8",
+            "192.168.11.0/24",
+            "fd00::1",
+            "fd00::/64",
+        ] {
+            let err = validate_dns_suffix(address).unwrap_err();
+            assert!(err.contains("is an address"), "{address}: {err}");
+        }
+        assert!(!looks_like_address("corp.example"));
+        assert!(!looks_like_address("10.example"));
+        // Whatever got stored stays removable.
+        assert_eq!(normalize_dns_suffix(" 10.0.0.100. "), "10.0.0.100");
     }
 }

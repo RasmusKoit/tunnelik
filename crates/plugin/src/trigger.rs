@@ -4,9 +4,12 @@
 //! The window or the `tunnelik` command registers this background task on network changes,
 //! sign-in and the user coming back to the PC; each time it runs, it dials the first always-on
 //! tunnel that is down, unless the user disconnected it on purpose. Windows' VPN management API
-//! does the dialing, which it allows a plugin's package to do for its own profiles.
+//! does the dialing, which it allows a plugin's package to do for its own profiles. A tunnel
+//! that starts on its own lives in a managed, all-user profile the API does not list; that one
+//! is dialed by name with `rasdial`, which reads both phonebooks.
 
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use windows::ApplicationModel::Background::{
@@ -116,10 +119,13 @@ fn bring_back() -> std::result::Result<Option<String>, String> {
                 .is_ok_and(|f| f.to_string().eq_ignore_ascii_case(&family))
         })
         .collect();
+    let ras_up = ras_connections();
     let any_up = profiles.iter().any(|p| {
         p.ConnectionStatus()
             .is_ok_and(|s| s != VpnManagementConnectionStatus::Disconnected)
-    });
+    }) || candidates
+        .iter()
+        .any(|c| ras_up.iter().any(|up| up.eq_ignore_ascii_case(&c.name)));
     let Some(name) = choose(&candidates, any_up) else {
         return Ok(if any_up {
             None
@@ -129,13 +135,13 @@ fn bring_back() -> std::result::Result<Option<String>, String> {
             Some("every always-on tunnel was stopped on purpose".into())
         });
     };
-    let profile = profiles
-        .iter()
-        .find(|p| {
-            p.ProfileName()
-                .is_ok_and(|n| n.to_string().eq_ignore_ascii_case(name))
-        })
-        .ok_or_else(|| format!("`{name}` has no VPN connection to dial"))?;
+    let Some(profile) = profiles.iter().find(|p| {
+        p.ProfileName()
+            .is_ok_and(|n| n.to_string().eq_ignore_ascii_case(name))
+    }) else {
+        file_log(&format!("always on: dialing `{name}` by name"));
+        return rasdial(name).map(|()| Some(format!("brought `{name}` back")));
+    };
     file_log(&format!("always on: dialing `{name}`"));
     let status = agent
         .ConnectProfileAsync(profile)
@@ -148,9 +154,70 @@ fn bring_back() -> std::result::Result<Option<String>, String> {
     }
 }
 
+/// Names of the RAS connections that are up right now, from `rasdial` with no arguments. Any
+/// failure reads as nothing up, which at worst dials a tunnel Windows then reports as connected.
+fn ras_connections() -> Vec<String> {
+    let Ok(out) = hidden(Command::new("rasdial.exe")).output() else {
+        return Vec::new();
+    };
+    parse_rasdial_list(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `rasdial` prints "Connected to", one name per line, then "Command completed successfully."
+/// (or "No connections" when nothing is up).
+fn parse_rasdial_list(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .skip_while(|l| !l.eq_ignore_ascii_case("connected to"))
+        .skip(1)
+        .take_while(|l| !l.is_empty() && !l.starts_with("Command completed"))
+        .map(String::from)
+        .collect()
+}
+
+/// Dials a profile by name, which reaches the all-user phonebook too.
+fn rasdial(name: &str) -> std::result::Result<(), String> {
+    let out = hidden(Command::new("rasdial.exe"))
+        .arg(name)
+        .output()
+        .map_err(|e| format!("starting rasdial: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let reason = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("unknown error");
+        Err(format!("dialing `{name}`: {reason}"))
+    }
+}
+
+fn hidden(mut command: Command) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_names_rasdial_lists() {
+        assert_eq!(
+            parse_rasdial_list(
+                "Connected to\r\nInfra\r\nLab\r\nCommand completed successfully.\r\n"
+            ),
+            vec!["Infra".to_string(), "Lab".to_string()]
+        );
+        assert!(
+            parse_rasdial_list("No connections\r\nCommand completed successfully.\r\n").is_empty()
+        );
+        assert!(parse_rasdial_list("").is_empty());
+    }
 
     fn c(name: &str, always_on: bool, stopped: bool, just_dropped: bool) -> Candidate {
         Candidate {
