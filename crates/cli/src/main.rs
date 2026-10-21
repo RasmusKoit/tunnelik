@@ -94,6 +94,9 @@ fn main() -> ExitCode {
             if t.apps.is_empty() && t.dns.is_empty() {
                 println!("Nothing starts `{name}` on its own.");
             }
+            if let Some(holder) = &t.elsewhere {
+                println!("`{holder}` is the tunnel that starts on its own; only one can.");
+            }
             for app in &t.apps {
                 println!("program  {app}");
             }

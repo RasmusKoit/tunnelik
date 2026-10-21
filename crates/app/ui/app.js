@@ -11,6 +11,7 @@ const ui = {
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
   toggle: $("toggle"), edit: $("edit"), del: $("delete"), keepAwake: $("keep-awake"), alwaysOn: $("always-on"),
   dApps: $("d-apps"), dDns: $("d-dns"), addApp: $("add-app"), addDns: $("add-dns"), dnsSuffix: $("dns-suffix"),
+  triggersElsewhere: $("triggers-elsewhere"),
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
   importFile: $("import"), cancel: $("cancel"), save: $("save"), error: $("error"),
   generate: $("generate"), pubkey: $("pubkey"), pubkeyValue: $("pubkey-value"),
@@ -224,6 +225,10 @@ function triggerRow(main, sub, remove) {
 
 function renderTriggers() {
   const t = details.triggers;
+  ui.triggersElsewhere.hidden = !t.elsewhere;
+  ui.triggersElsewhere.textContent = t.elsewhere
+    ? `Right now "${t.elsewhere}" is the tunnel that starts on its own. Remove its programs and domains to use this one instead.`
+    : "";
   ui.dApps.replaceChildren(...t.apps.map((program) => triggerRow(
     program.split(/[\\/]/).pop(), program,
     () => invoke("remove_app_trigger", { name: selected, program }))));
@@ -319,8 +324,9 @@ function setButtons() {
   ui.del.disabled = busy;
   ui.keepAwake.disabled = busy;
   ui.alwaysOn.disabled = busy;
-  ui.addApp.disabled = busy;
-  ui.addDns.disabled = busy || !ui.dnsSuffix.value.trim();
+  const elsewhere = !!details?.triggers?.elsewhere;
+  ui.addApp.disabled = busy || elsewhere;
+  ui.addDns.disabled = busy || elsewhere || !ui.dnsSuffix.value.trim();
   ui.generate.disabled = busy;
 }
 

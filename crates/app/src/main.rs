@@ -59,11 +59,13 @@ mod commands {
         peers: Vec<Peer>,
     }
 
-    /// Programs and DNS suffixes that make Windows dial the tunnel.
+    /// Programs and DNS suffixes that make Windows dial the tunnel, or the other tunnel that
+    /// holds them.
     #[derive(Serialize)]
     pub struct Triggers {
         apps: Vec<String>,
         dns: Vec<String>,
+        elsewhere: Option<String>,
     }
 
     #[derive(Serialize)]
@@ -93,6 +95,7 @@ mod commands {
                 triggers: Triggers {
                     apps: d.triggers.apps,
                     dns: d.triggers.dns,
+                    elsewhere: d.triggers.elsewhere,
                 },
                 peers: d
                     .peers

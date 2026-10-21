@@ -18,21 +18,38 @@ use crate::profile::validate_name;
 const DIR: &str = "tunnels";
 const EXTENSION: &str = ".options";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
     /// Hold the PC out of idle sleep while the tunnel carries traffic. The plugin decides what
     /// counts as traffic; see `BUSY_BYTES_PER_MINUTE` in `vpn`.
     pub keep_awake: bool,
-    /// A copy of the VPN profile's always-on flag, so the plugin can tell a redial by Windows
-    /// from one the user asked for. The profile is the truth; the tools keep this in step.
+    /// Tunnelik's own always-on: bring the tunnel back after Windows dropped it, and at
+    /// sign-in. The plugin also reads it to tell such a redial from one the user asked for.
     pub always_on: bool,
+    /// Programs whose start makes Windows dial the tunnel, as full paths.
+    pub app_triggers: Vec<String>,
+    /// DNS suffixes a lookup under which makes Windows dial the tunnel, without a leading dot.
+    pub dns_triggers: Vec<String>,
+}
+
+impl Options {
+    pub fn has_triggers(&self) -> bool {
+        !self.app_triggers.is_empty() || !self.dns_triggers.is_empty()
+    }
 }
 
 pub fn encode(options: &Options) -> String {
-    format!(
+    let mut text = format!(
         "keep-awake = {}\nalways-on = {}\n",
         options.keep_awake, options.always_on
-    )
+    );
+    for app in &options.app_triggers {
+        text.push_str(&format!("app-trigger = {app}\n"));
+    }
+    for dns in &options.dns_triggers {
+        text.push_str(&format!("dns-trigger = {dns}\n"));
+    }
+    text
 }
 
 pub fn decode(text: &str) -> Options {
@@ -41,10 +58,13 @@ pub fn decode(text: &str) -> Options {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let on = value.trim() == "true";
+        let value = value.trim();
+        let on = value == "true";
         match key.trim() {
             "keep-awake" => options.keep_awake = on,
             "always-on" => options.always_on = on,
+            "app-trigger" if !value.is_empty() => options.app_triggers.push(value.to_string()),
+            "dns-trigger" if !value.is_empty() => options.dns_triggers.push(value.to_string()),
             _ => {}
         }
     }
@@ -94,10 +114,14 @@ mod tests {
                 let options = Options {
                     keep_awake,
                     always_on,
+                    app_triggers: vec!["C:\\Program Files\\Some App\\app.exe".into()],
+                    dns_triggers: vec!["corp.example".into(), "lab.example".into()],
                 };
                 assert_eq!(decode(&encode(&options)), options);
+                assert!(options.has_triggers());
             }
         }
+        assert!(!Options::default().has_triggers());
     }
 
     #[test]
@@ -105,10 +129,10 @@ mod tests {
         assert_eq!(decode(""), Options::default());
         assert_eq!(decode("keep-awake = yes\n"), Options::default());
         assert_eq!(
-            decode("# comment\nfrom-the-future = 1\n keep-awake=true \r\n"),
+            decode("# comment\nfrom-the-future = 1\n keep-awake=true \r\napp-trigger = \n"),
             Options {
                 keep_awake: true,
-                always_on: false
+                ..Options::default()
             }
         );
         // A file from before always-on existed.
@@ -122,7 +146,7 @@ mod tests {
 
         let on = Options {
             keep_awake: true,
-            always_on: false,
+            ..Options::default()
         };
         assert_eq!(load(&dir, "Home").unwrap(), Options::default());
         save(&dir, "Home", &on).unwrap();

@@ -51,7 +51,9 @@
       <div class="card">
         <h2 class="card-title">Start on its own</h2>
         <p class="hint hint-lead">Windows connects this tunnel when one of these programs starts,
-          or when a name under one of these domains is looked up.</p>
+          or when a name under one of these domains is looked up. Windows watches for one tunnel
+          at a time, and the tunnel must be disconnected while this list changes.</p>
+        <p id="triggers-elsewhere" class="hint hint-lead" hidden></p>
         <ul id="d-apps" class="triggers" aria-label="Programs"></ul>
         <div class="trigger-add">
           <button id="add-app" class="button">Add program…</button>

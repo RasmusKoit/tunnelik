@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod mdm;
+
 use tunnelik_plugin::markers::{self, Marker};
 use tunnelik_plugin::{options, profile, settings, store};
 use windows::ApplicationModel::Background::{
@@ -341,17 +343,67 @@ pub fn repair() -> Result<Vec<String>, String> {
     let existing: Vec<&str> = existing.lines().map(str::trim).collect();
     let connections = connections()?;
 
+    let dir = local_state()?;
     let mut repaired = Vec::new();
-    for name in store::list(&local_state()?) {
-        let connected = state_of(&connections, &name) != State::Disconnected;
+    for name in store::list(&dir) {
+        if state_of(&connections, &name) != State::Disconnected {
+            continue;
+        }
+        let options = options::load(&dir, &name).unwrap_or_default();
         let in_phonebook = existing.iter().any(|e| e.eq_ignore_ascii_case(&name));
-        if !in_phonebook && !connected {
+        if options.has_triggers() {
+            // A tunnel that starts on its own lives in a managed profile; an ordinary one in
+            // its way, or a missing managed one, gets put right.
+            if in_phonebook || !managed_exists(&name)? {
+                retire_hidden_profile(&name)?;
+                remove_profile(&name, &family)?;
+                let (host, _) = tunnel_server(&name)?;
+                apply_managed(&name, &host, &options)?;
+                repaired.push(name);
+            }
+        } else if !in_phonebook {
             retire_hidden_profile(&name)?;
+            if managed_exists(&name)? {
+                mdm::remove(&name)?;
+            }
             save(&name, &read(&name)?)?;
             repaired.push(name);
         }
     }
     Ok(repaired)
+}
+
+/// Whether `name` has a managed profile in the all-users phonebook, where the service puts
+/// the ones Windows dials on its own.
+fn managed_exists(name: &str) -> Result<bool, String> {
+    let family = package_family()?;
+    let found = powershell(
+        "$c = Get-VpnConnection -AllUserConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue; [bool]($c -and $c.PlugInApplicationID -eq $env:TUNNELIK_FAMILY)",
+        &[("TUNNELIK_NAME", name), ("TUNNELIK_FAMILY", &family)],
+    )?;
+    Ok(found.eq_ignore_ascii_case("true"))
+}
+
+/// The first peer's host, shown as the connection's server, and whether the config routes
+/// everything into the tunnel.
+fn tunnel_server(name: &str) -> Result<(String, bool), String> {
+    let config = wgconf::parse(&read(name)?).map_err(|e| e.to_string())?;
+    let s = settings::from_config(&config)?.settings;
+    let full_tunnel =
+        s.ipv4_routes.iter().any(|r| r.1 == 0) || s.ipv6_routes.iter().any(|r| r.1 == 0);
+    Ok((s.endpoints[0].host.clone(), full_tunnel))
+}
+
+/// Has the service (re)build `name`'s managed profile from its options.
+fn apply_managed(name: &str, host: &str, options: &options::Options) -> Result<(), String> {
+    let xml = mdm::profile_xml(
+        &package_family()?,
+        host,
+        &profile::custom_configuration(name),
+        &options.app_triggers,
+        &options.dns_triggers,
+    );
+    mdm::apply(name, &xml)
 }
 
 /// Deletes a profile the VPN management API created for `name` in the package's own phonebook,
@@ -457,12 +509,37 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
     let s = settings::from_config(&config)?.settings;
     let full_tunnel =
         s.ipv4_routes.iter().any(|r| r.1 == 0) || s.ipv6_routes.iter().any(|r| r.1 == 0);
-
-    let family = package_family()?;
+    let dir = local_state()?;
+    let options = options::load(&dir, name)?;
 
     // The VPN profile comes first: if the name already belongs to another VPN, nothing gets
-    // saved. Values travel as environment variables, so nothing in them is parsed as PowerShell.
-    let outcome = powershell(
+    // saved.
+    let created = if options.has_triggers() {
+        // The managed profile only shows the server as a label; refresh it when it can be.
+        if state_of(&connections()?, name) == State::Disconnected {
+            apply_managed(name, &s.endpoints[0].host, &options)?;
+        }
+        false
+    } else {
+        ensure_user_profile(name, &s.endpoints[0].host, full_tunnel)? == "created"
+    };
+
+    // Without its config a new profile would be a tunnel that can never connect, so take it
+    // back out if saving fails.
+    if let Err(e) = store::save(&dir, name, config_text) {
+        if created {
+            let _ = remove_profile(name, &package_family()?);
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Creates or updates the ordinary, per-user profile for `name`, and says which it did. Values
+/// travel as environment variables, so nothing in them is parsed as PowerShell.
+fn ensure_user_profile(name: &str, server: &str, full_tunnel: bool) -> Result<String, String> {
+    let family = package_family()?;
+    powershell(
         r#"
         $ErrorActionPreference = 'Stop'
         $split = $env:TUNNELIK_SPLIT -eq '1'
@@ -491,22 +568,12 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
         &[
             ("TUNNELIK_NAME", name),
             // Shown in Settings; the plugin connects to every peer's endpoint itself.
-            ("TUNNELIK_SERVER", &s.endpoints[0].host),
+            ("TUNNELIK_SERVER", server),
             ("TUNNELIK_FAMILY", &family),
             ("TUNNELIK_PROFILE", &profile::custom_configuration(name)),
             ("TUNNELIK_SPLIT", if full_tunnel { "0" } else { "1" }),
         ],
-    )?;
-
-    // Without its config a new profile would be a tunnel that can never connect, so take it
-    // back out if saving fails.
-    if let Err(e) = local_state().and_then(|dir| store::save(&dir, name, config_text)) {
-        if outcome == "created" {
-            let _ = remove_profile(name, &family);
-        }
-        return Err(e);
-    }
-    Ok(())
+    )
 }
 
 /// Removes one of Tunnelik's own tunnels; other VPN connections are never touched.
@@ -517,6 +584,9 @@ pub fn remove(name: &str) -> Result<(), String> {
     }
     remove_profile(name, &package_family()?)?;
     retire_hidden_profile(name)?;
+    if managed_exists(name)? {
+        mdm::remove(name)?;
+    }
     let dir = local_state()?;
     store::remove(&dir, name)?;
     markers::clear(&dir, name);
@@ -572,95 +642,107 @@ pub fn disconnect(name: &str) -> Result<(), String> {
 // ---- Triggers: programs and DNS suffixes that make Windows dial the tunnel ----
 
 /// What makes Windows bring a tunnel up on its own: starting one of these programs, or looking
-/// up a name under one of these DNS suffixes.
+/// up a name under one of these DNS suffixes. Windows watches on behalf of one profile per
+/// machine, so only one tunnel can have any.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Triggers {
     /// Full paths of programs.
     pub apps: Vec<String>,
-    /// DNS suffixes, lower case.
+    /// DNS suffixes, lower case, without a leading dot.
     pub dns: Vec<String>,
+    /// The other tunnel that holds the triggers, if one does.
+    pub elsewhere: Option<String>,
 }
 
 pub fn triggers(name: &str) -> Result<Triggers, String> {
     ensure_exists(name)?;
-    let text = powershell(
-        r#"
-        $t = Get-VpnConnectionTrigger -ConnectionName $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
-        foreach ($a in $t.ApplicationID) { "app`t$a" }
-        foreach ($d in $t.dnsConfig) { "dns`t$($d.DnsSuffix)" }
-        "#,
-        &[("TUNNELIK_NAME", name)],
-    )?;
-    Ok(parse_triggers(&text))
+    let dir = local_state()?;
+    let options = options::load(&dir, name)?;
+    Ok(Triggers {
+        apps: options.app_triggers,
+        dns: options.dns_triggers,
+        elsewhere: trigger_holder(&dir).filter(|h| !h.eq_ignore_ascii_case(name)),
+    })
 }
 
-/// One `app<TAB>path` or `dns<TAB>suffix` line per trigger. Windows stores a suffix with a
-/// leading dot; it is shown without.
-fn parse_triggers(text: &str) -> Triggers {
-    let mut triggers = Triggers::default();
-    for line in text.lines() {
-        match line.split_once('\t') {
-            Some(("app", path)) if !path.trim().is_empty() => {
-                triggers.apps.push(path.trim().to_string())
-            }
-            Some(("dns", suffix)) if !suffix.trim().trim_start_matches('.').is_empty() => triggers
-                .dns
-                .push(suffix.trim().trim_start_matches('.').to_string()),
-            _ => {}
-        }
-    }
-    triggers
+/// The tunnel that has triggers, if any.
+fn trigger_holder(dir: &std::path::Path) -> Option<String> {
+    store::list(dir)
+        .into_iter()
+        .find(|n| options::load(dir, n).is_ok_and(|o| o.has_triggers()))
 }
 
 /// Makes starting `program` bring `name` up. The path must point at an existing `.exe`.
 pub fn add_app_trigger(name: &str, program: &str) -> Result<(), String> {
     ensure_exists(name)?;
     let program = validate_program_path(program)?;
-    trigger_command(
-        "Add-VpnConnectionTriggerApplication -ConnectionName $env:TUNNELIK_NAME -ApplicationID $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
-        name,
-        &program,
-    )
+    let mut options = options::load(&local_state()?, name)?;
+    if !options
+        .app_triggers
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(&program))
+    {
+        options.app_triggers.push(program);
+    }
+    set_triggers(name, options)
 }
 
 pub fn remove_app_trigger(name: &str, program: &str) -> Result<(), String> {
     ensure_exists(name)?;
-    trigger_command(
-        "Remove-VpnConnectionTriggerApplication -ConnectionName $env:TUNNELIK_NAME -ApplicationID $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
-        name,
-        program,
-    )
+    let mut options = options::load(&local_state()?, name)?;
+    options
+        .app_triggers
+        .retain(|a| !a.eq_ignore_ascii_case(program.trim()));
+    set_triggers(name, options)
 }
 
 /// Makes looking up any name under `suffix` bring `name` up.
 pub fn add_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
     ensure_exists(name)?;
     let suffix = validate_dns_suffix(suffix)?;
-    trigger_command(
-        "Add-VpnConnectionTriggerDnsConfiguration -ConnectionName $env:TUNNELIK_NAME -DnsSuffix $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
-        name,
-        &suffix,
-    )
+    let mut options = options::load(&local_state()?, name)?;
+    if !options.dns_triggers.contains(&suffix) {
+        options.dns_triggers.push(suffix);
+    }
+    set_triggers(name, options)
 }
 
 pub fn remove_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
     ensure_exists(name)?;
-    // Windows knows the suffix with its leading dot.
-    let stored = format!(".{}", validate_dns_suffix(suffix)?);
-    trigger_command(
-        "Remove-VpnConnectionTriggerDnsConfiguration -ConnectionName $env:TUNNELIK_NAME -DnsSuffix $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
-        name,
-        &stored,
-    )
+    let suffix = validate_dns_suffix(suffix)?;
+    let mut options = options::load(&local_state()?, name)?;
+    options.dns_triggers.retain(|d| *d != suffix);
+    set_triggers(name, options)
 }
 
-fn trigger_command(script: &str, name: &str, value: &str) -> Result<(), String> {
-    powershell(
-        script,
-        &[("TUNNELIK_NAME", name), ("TUNNELIK_VALUE", value)],
-    )
-    .map(|_| ())
-    .map_err(|e| format!("changing the tunnel's triggers: {e}"))
+/// Saves a tunnel's new trigger list and rebuilds its VPN profile to match: with triggers it
+/// becomes a managed profile the service applies through Windows' MDM bridge, without any it
+/// goes back to an ordinary one. Either way the profile is replaced, so the tunnel must be
+/// disconnected.
+fn set_triggers(name: &str, options: options::Options) -> Result<(), String> {
+    let dir = local_state()?;
+    if options.has_triggers()
+        && let Some(holder) = trigger_holder(&dir).filter(|h| !h.eq_ignore_ascii_case(name))
+    {
+        return Err(format!(
+            "Only one tunnel can start on its own, and `{holder}` already does; remove its programs and domains first"
+        ));
+    }
+    if state_of(&connections()?, name) != State::Disconnected {
+        return Err(format!(
+            "disconnect `{name}` first: Windows rebuilds its VPN connection for this"
+        ));
+    }
+    let before = options::load(&dir, name)?;
+    let (host, full_tunnel) = tunnel_server(name)?;
+    if options.has_triggers() {
+        remove_profile(name, &package_family()?)?;
+        apply_managed(name, &host, &options)?;
+    } else if before.has_triggers() || managed_exists(name)? {
+        mdm::remove(name)?;
+        ensure_user_profile(name, &host, full_tunnel)?;
+    }
+    options::save(&dir, name, &options)
 }
 
 /// A program for an app trigger: an absolute path to an existing `.exe`, with nothing in it that
@@ -908,19 +990,6 @@ mod tests {
             with_private_key("[interface]\nprivatekey=old\n", key),
             "[interface]\nPrivateKey = KEY=\n"
         );
-    }
-
-    #[test]
-    fn parses_trigger_listings() {
-        let text = "app\tC:\\Program Files\\Some App\\app.exe\napp\t\ndns\t.corp.example\nodd line\ndns\t  \ndns\t.\n";
-        assert_eq!(
-            parse_triggers(text),
-            Triggers {
-                apps: vec!["C:\\Program Files\\Some App\\app.exe".into()],
-                dns: vec!["corp.example".into()],
-            }
-        );
-        assert_eq!(parse_triggers(""), Triggers::default());
     }
 
     #[test]

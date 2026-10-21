@@ -1,0 +1,28 @@
+[package]
+name = "tunnelik-service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "Tunnelik's SYSTEM service: applies VPN profiles with triggers through Windows' MDM bridge"
+
+[[bin]]
+name = "tunnelik_svc"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+windows-core = "0.62"
+windows-link = "0.2"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
