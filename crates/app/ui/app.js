@@ -10,8 +10,8 @@ const ui = {
   list: $("tunnels"), add: $("new"), empty: $("empty"),
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
   toggle: $("toggle"), edit: $("edit"), del: $("delete"), keepAwake: $("keep-awake"), alwaysOn: $("always-on"),
-  dApps: $("d-apps"), dDns: $("d-dns"), addApp: $("add-app"), addDns: $("add-dns"), dnsSuffix: $("dns-suffix"),
-  dSubnets: $("d-subnets"), addSubnet: $("add-subnet"), subnetCidr: $("subnet-cidr"),
+  dApps: $("d-apps"), addApp: $("add-app"), groupPrograms: $("group-programs"),
+  dDestinations: $("d-destinations"), addDestination: $("add-destination"), destination: $("destination"),
   triggersElsewhere: $("triggers-elsewhere"), triggersOff: $("triggers-off"), triggersOn: $("triggers-on"),
   triggersStop: $("triggers-stop"),
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
@@ -212,8 +212,9 @@ function triggerRow(main, sub, remove) {
   const detail = document.createElement("span");
   detail.className = "trigger-sub";
   detail.textContent = sub;
+  if (sub) detail.title = sub;
   const button = document.createElement("button");
-  button.className = "button";
+  button.className = "button small";
   button.textContent = "Remove";
   button.setAttribute("aria-label", `Remove ${main}`);
   button.disabled = busy;
@@ -227,25 +228,29 @@ function triggerRow(main, sub, remove) {
 
 function renderTriggers() {
   const t = details.triggers;
-  // Off: only the switch shows. On: the lists, the add controls and a way to turn it off.
+  // Windows' side (programs, domains) needs its switch; subnets are Tunnelik's own and always
+  // work, so the destinations group always shows.
   ui.triggersOff.hidden = t.enabled;
-  for (const el of [ui.dApps, ui.dDns, ui.addApp.parentElement, ui.addDns.parentElement]) {
-    el.hidden = !t.enabled;
-  }
+  ui.triggersStop.hidden = !t.enabled;
+  ui.groupPrograms.hidden = !t.enabled;
   ui.triggersElsewhere.hidden = !t.enabled || !t.elsewhere;
   ui.triggersElsewhere.textContent = t.elsewhere
-    ? `Right now "${t.elsewhere}" is the tunnel that starts on its own. Remove its programs and domains to use this one instead.`
+    ? `Right now "${t.elsewhere}" is the tunnel Windows starts on its own. Remove its programs and domains to use this one instead.`
     : "";
   ui.dApps.replaceChildren(...t.apps.map((program) => triggerRow(
     program.split(/[\\/]/).pop(), program,
     () => invoke("remove_app_trigger", { name: selected, program }))));
-  ui.dDns.replaceChildren(...t.dns.map((suffix) => triggerRow(
-    suffix, "this name and any under it",
-    () => invoke("remove_dns_trigger", { name: selected, suffix }))));
-  // Subnets are Tunnelik's own and need nothing turned on.
-  ui.dSubnets.replaceChildren(...t.subnets.map((cidr) => triggerRow(
-    cidr, "when a program first reaches this range",
-    () => invoke("remove_subnet_trigger", { name: selected, cidr }))));
+  ui.dDestinations.replaceChildren(
+    ...t.dns.map((suffix) => triggerRow(suffix, "domain",
+      () => invoke("remove_dns_trigger", { name: selected, suffix }))),
+    ...t.subnets.map((cidr) => triggerRow(cidr, "range",
+      () => invoke("remove_subnet_trigger", { name: selected, cidr }))));
+}
+
+/// A destination typed into the box: an address or range goes to the subnet watcher, anything
+/// else is a domain; the Rust side checks either properly.
+function isRange(text) {
+  return text.includes(":") || /^\d+\.\d+\.\d+\.\d+(\/\d+)?$/.test(text);
 }
 
 let live = null;          // the plugin's status while the selected tunnel is connected
@@ -337,8 +342,7 @@ function setButtons() {
   ui.alwaysOn.disabled = busy;
   const elsewhere = !!details?.triggers?.elsewhere;
   ui.addApp.disabled = busy || elsewhere;
-  ui.addDns.disabled = busy || elsewhere || !ui.dnsSuffix.value.trim();
-  ui.addSubnet.disabled = busy || !ui.subnetCidr.value.trim();
+  ui.addDestination.disabled = busy || !ui.destination.value.trim();
   ui.triggersOn.disabled = busy;
   ui.triggersStop.disabled = busy;
   // The rows are rendered while a change is still in flight, so they follow `busy` from here.
@@ -532,22 +536,17 @@ ui.triggersStop.onclick = () => run(async () => {
   await invoke("enable_triggers", { enabled: false });
   await loadDetails(selected);
 });
-ui.dnsSuffix.oninput = setButtons;
-ui.dnsSuffix.onkeydown = (e) => { if (e.key === "Enter" && !ui.addDns.disabled) ui.addDns.click(); };
-ui.addDns.onclick = () => run(async () => {
-  const suffix = ui.dnsSuffix.value.trim();
-  if (!suffix) return;
-  await invoke("add_dns_trigger", { name: selected, suffix });
-  ui.dnsSuffix.value = "";
-  await loadDetails(selected);
-});
-ui.subnetCidr.oninput = setButtons;
-ui.subnetCidr.onkeydown = (e) => { if (e.key === "Enter" && !ui.addSubnet.disabled) ui.addSubnet.click(); };
-ui.addSubnet.onclick = () => run(async () => {
-  const cidr = ui.subnetCidr.value.trim();
-  if (!cidr) return;
-  await invoke("add_subnet_trigger", { name: selected, cidr });
-  ui.subnetCidr.value = "";
+ui.destination.oninput = setButtons;
+ui.destination.onkeydown = (e) => { if (e.key === "Enter" && !ui.addDestination.disabled) ui.addDestination.click(); };
+ui.addDestination.onclick = () => run(async () => {
+  const text = ui.destination.value.trim();
+  if (!text) return;
+  if (isRange(text)) {
+    await invoke("add_subnet_trigger", { name: selected, cidr: text });
+  } else {
+    await invoke("add_dns_trigger", { name: selected, suffix: text });
+  }
+  ui.destination.value = "";
   await loadDetails(selected);
 });
 

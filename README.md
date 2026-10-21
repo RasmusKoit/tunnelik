@@ -164,8 +164,8 @@ DNS never reaches the Windows resolver and so never triggers anything.
 ### Subnets
 
 Windows has no trigger for an address range, so that one is Tunnelik's own. Add `10.0.0.0/8`
-under **Tunnelik itself connects this tunnel** (or `tunnelik trigger <name> subnet 10.0.0.0/8`)
-and a small watcher, `tunnelik_watch.exe`, reads the system's TCP table once a second for
+under **Destinations** in the Start on its own card, next to the domains (or
+`tunnelik trigger <name> subnet 10.0.0.0/8`), and a small watcher, `tunnelik_watch.exe`, reads the system's TCP table once a second for
 connections a program is trying to open into that range and dials the tunnel for the first one.
 The tunnel is up a second or two later; the attempt that triggered it still fails, since Windows
 keeps that connection on the route it chose, and the program's next try goes through. A toast

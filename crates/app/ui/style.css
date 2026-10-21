@@ -139,7 +139,8 @@ main {
 .empty { margin: auto; max-width: 440px; text-align: center; color: var(--muted); }
 .empty h2 { color: var(--text); font-weight: 600; font-size: 18px; }
 
-.details { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow: auto; }
+/* Capped: at a wide window, rows and labels would otherwise stretch across the whole screen. */
+.details { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow: auto; max-width: 840px; }
 .peers { display: flex; flex-direction: column; gap: 12px; }
 .details-foot { display: flex; align-items: center; gap: 10px; }
 
@@ -150,13 +151,22 @@ main {
   border-radius: var(--radius);
 }
 .card-title { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
-.card-actions { margin-top: 12px; padding-left: 132px; }
+.card-head { display: flex; align-items: baseline; gap: 10px; }
+.card-head .card-title { margin-bottom: 4px; }
+.card-actions { margin-top: 12px; padding-left: 162px; }
 
-.option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0 132px; cursor: pointer; }
+.option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0 162px; cursor: pointer; }
 .option input { margin: 0; accent-color: var(--accent); }
-.hint { margin: 2px 0 0 132px; font-size: 12px; color: var(--muted); }
+.hint { margin: 2px 0 0 162px; font-size: 12px; color: var(--muted); }
 .hint-lead { margin: 0 0 4px; }
-.group-lead { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+/* The kinds of trigger, each a titled group. */
+.trigger-group { margin-top: 14px; }
+.group-title { margin: 0 0 2px; font-size: 13px; font-weight: 600; }
+.more { margin-top: 14px; font-size: 12px; color: var(--muted); }
+.more summary { cursor: pointer; color: var(--accent); }
+.more summary:hover { text-decoration: underline; }
+.more p { margin: 6px 0 0; max-width: 72ch; }
 .hint-inline { margin: 0; align-self: center; }
 
 /* Programs and domains that start the tunnel. */
@@ -166,12 +176,13 @@ main {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 10px;
+  padding: 4px 4px 4px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
-.trigger-main { font-weight: 600; white-space: nowrap; }
-.trigger-sub { flex: 1; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+/* One line per row: a long path is cut with an ellipsis and shown in full on hover. */
+.trigger-main { flex: none; max-width: 55%; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trigger-sub { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .trigger-add { display: flex; gap: 8px; margin-top: 8px; }
 .field {
   flex: 1;
@@ -187,7 +198,7 @@ main {
 
 .fields {
   display: grid;
-  grid-template-columns: 120px 1fr;
+  grid-template-columns: 150px 1fr;
   gap: 6px 12px;
   margin: 0;
 }
@@ -249,6 +260,8 @@ main {
 }
 .button:hover { filter: brightness(0.97); }
 .button:disabled { opacity: 0.5; cursor: default; }
+.button.small { padding: 3px 10px; font-size: 13px; color: var(--muted); }
+.button.small:hover { color: var(--text); }
 .button.primary { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
 .button.primary:hover { background: var(--accent-hover); }
 .button.danger { color: var(--bad); }

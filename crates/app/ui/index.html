@@ -34,59 +34,68 @@
           <input id="keep-awake" type="checkbox">
           <span>Keep this PC awake while the tunnel is busy</span>
         </label>
-        <p class="hint">Holds off the idle sleep timer while more than about 64 KiB a minute goes
-          through the tunnel. Closing the lid or pressing the power button still works.</p>
+        <p class="hint">Holds off idle sleep while more than about 64 KiB a minute goes through.
+          The lid and the power button still work.</p>
         <label class="option">
           <input id="always-on" type="checkbox">
           <span>Always on: connect at sign-in, and again after Windows drops it</span>
         </label>
-        <p class="hint">Windows brings the tunnel back after standby or a network change. Turning
-          it off here, in Settings or from the flyout keeps it off until the next sign-in or
-          network change.</p>
+        <p class="hint">Reconnects after standby or a network change. Turning it off here, in
+          Settings or in the flyout keeps it off until the next sign-in or network change.</p>
         <div class="card-actions">
           <button id="toggle" class="button primary"></button>
         </div>
       </div>
-      <!-- What makes Windows dial the tunnel on its own; Windows keeps the list on the profile. -->
+      <!-- What makes the tunnel connect on its own. Programs and domains are Windows' triggers,
+           kept on a managed profile; subnets are watched by Tunnelik's own watcher. The window
+           shows domains and subnets as one list of destinations. -->
       <div class="card">
-        <h2 class="card-title">Start on its own</h2>
-        <p class="hint hint-lead">Windows connects this tunnel when one of these programs starts,
-          or when one of these domains, or a name under one, is looked up. It watches names, not
-          addresses or subnets, and names under these domains are resolved through the tunnel's
-          DNS. Windows watches for one tunnel at a time; after you disconnect it yourself, it
-          waits for the next network change or sign-in before starting it again. Changing this
-          list rebuilds the tunnel's VPN connection, reconnecting it afterwards if it was up.</p>
+        <div class="card-head">
+          <h2 class="card-title">Start on its own</h2>
+          <span class="spacer"></span>
+          <button id="triggers-stop" class="linkish" title="Stops the helper service; tunnels keep their lists but no longer start for a program or a domain" hidden>Turn off Windows triggers</button>
+        </div>
         <p id="triggers-elsewhere" class="hint hint-lead" hidden></p>
         <!-- Off by default: it starts a system service, so it asks before touching the system. -->
-        <div id="triggers-off" class="trigger-add" hidden>
+        <div id="triggers-off" class="trigger-add">
           <button id="triggers-on" class="button primary">Turn on…</button>
-          <span class="hint hint-inline">Starts Tunnelik's helper service, which keeps such a
-            tunnel's profile system-wide, until you turn it off or restart the PC. Windows asks
-            for administrator approval.</span>
+          <span class="hint hint-inline">Lets Windows start this tunnel for a program or a domain.
+            Starts Tunnelik's helper service; Windows asks for administrator approval.</span>
         </div>
-        <ul id="d-apps" class="triggers" aria-label="Programs"></ul>
-        <div class="trigger-add">
-          <button id="add-app" class="button">Add program…</button>
-        </div>
-        <ul id="d-dns" class="triggers" aria-label="Domains"></ul>
-        <div class="trigger-add">
-          <input id="dns-suffix" class="field" placeholder="corp.example" spellcheck="false" autocomplete="off">
-          <button id="add-dns" class="button">Add domain</button>
-          <span class="spacer"></span>
-          <button id="triggers-stop" class="linkish" title="Stops the helper service; tunnels keep their lists but no longer start on their own">Turn off</button>
-        </div>
-        <!-- Tunnelik's own trigger, no service or managed profile involved: a watcher Windows
-             starts at sign-in reads the TCP table for connections headed into these ranges. -->
-        <p class="hint hint-lead group-lead">Tunnelik itself connects this tunnel when a program
-          first tries to reach one of these ranges. It sees TCP connections only; ping and UDP
-          do not count. The attempt that starts the tunnel still fails, the program's next try
-          goes through. After you disconnect the tunnel yourself it stays down for ten
-          minutes.</p>
-        <ul id="d-subnets" class="triggers" aria-label="Subnets"></ul>
-        <div class="trigger-add">
-          <input id="subnet-cidr" class="field" placeholder="10.0.0.0/8" spellcheck="false" autocomplete="off">
-          <button id="add-subnet" class="button">Add subnet</button>
-        </div>
+        <section id="group-programs" class="trigger-group" hidden>
+          <h3 class="group-title">Programs</h3>
+          <p class="hint hint-lead">The tunnel connects when one of these starts.</p>
+          <ul id="d-apps" class="triggers" aria-label="Programs"></ul>
+          <div class="trigger-add">
+            <button id="add-app" class="button">Add program…</button>
+          </div>
+        </section>
+        <section class="trigger-group">
+          <h3 class="group-title">Destinations</h3>
+          <p class="hint hint-lead">The tunnel connects when a name under one of these domains is
+            looked up, or a program first tries to reach one of these ranges.</p>
+          <ul id="d-destinations" class="triggers" aria-label="Domains and subnets"></ul>
+          <div class="trigger-add">
+            <input id="destination" class="field" placeholder="corp.example or 10.0.0.0/8" spellcheck="false" autocomplete="off">
+            <button id="add-destination" class="button">Add</button>
+          </div>
+        </section>
+        <details class="more">
+          <summary>How this works</summary>
+          <p>Programs and domains are Windows' own VPN triggers, so they need the switch above.
+            Windows watches one tunnel at a time and keeps that tunnel's profile system-wide.
+            Names under a domain resolve through the tunnel's DNS. After you disconnect the
+            tunnel yourself, Windows waits for the next network change or sign-in before
+            starting it again. The request that starts the tunnel runs before it is up, so it
+            may fail once; a toast says when the tunnel is up. Changing programs or domains
+            rebuilds the tunnel's VPN connection, reconnecting it afterwards if it was up. A
+            browser with its own secure DNS never reaches the Windows resolver and so never
+            triggers anything.</p>
+          <p>Ranges are watched by Tunnelik itself and need nothing turned on. Only TCP
+            connections are seen; ping and UDP leave no trace. The attempt that starts the
+            tunnel fails, the program's next try goes through. After you disconnect the tunnel
+            yourself it stays down for ten minutes.</p>
+        </details>
       </div>
       <div id="d-peers" class="peers"></div>
       <div class="details-foot">
