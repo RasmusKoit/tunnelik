@@ -11,7 +11,7 @@ $root = Split-Path $PSScriptRoot
 $profileName = if ($Debug) { 'debug' } else { 'release' }
 $out = Join-Path $root 'target\appx'
 
-$buildArgs = @('build', '--manifest-path', "$root\Cargo.toml", '-p', 'tunnelik-host', '-p', 'tunnelik-plugin', '-p', 'tunnelik-cli', '-p', 'tunnelik-app')
+$buildArgs = @('build', '--manifest-path', "$root\Cargo.toml", '-p', 'tunnelik-host', '-p', 'tunnelik-plugin', '-p', 'tunnelik-cli', '-p', 'tunnelik-app', '-p', 'tunnelik-service')
 if (-not $Debug) { $buildArgs += '--release' }
 # cargo reports progress on stderr, which Windows PowerShell would treat as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'
@@ -40,7 +40,7 @@ $version = '0.0.{0}.{1}' -f [int][math]::Floor(($now - [datetime]'2026-01-01').T
 $manifest.Package.Identity.Version = $version
 $manifest.Save("$out\AppxManifest.xml")
 Copy-Item -Recurse -Force "$root\package\Assets" $out
-foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe') {
+foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe', 'tunnelik_svc.exe') {
     Copy-Item -Force "$root\target\$profileName\$file" $out
 }
 Copy-Item -Force "$root\README.md", "$root\LICENSE-MIT", "$root\LICENSE-APACHE", "$root\THIRD_PARTY_NOTICES.md" $out -ErrorAction SilentlyContinue

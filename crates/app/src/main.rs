@@ -66,6 +66,7 @@ mod commands {
         apps: Vec<String>,
         dns: Vec<String>,
         elsewhere: Option<String>,
+        enabled: bool,
     }
 
     #[derive(Serialize)]
@@ -96,6 +97,7 @@ mod commands {
                     apps: d.triggers.apps,
                     dns: d.triggers.dns,
                     elsewhere: d.triggers.elsewhere,
+                    enabled: d.triggers.enabled,
                 },
                 peers: d
                     .peers
@@ -146,6 +148,12 @@ mod commands {
                 .map(|path| path.display().to_string()))
         })
         .await
+    }
+
+    /// Turns "start on its own" on or off; Windows asks for administrator approval.
+    #[tauri::command]
+    pub async fn enable_triggers(enabled: bool) -> Result<(), String> {
+        blocking(move || manage::enable_triggers(enabled)).await
     }
 
     #[tauri::command]
@@ -280,6 +288,7 @@ fn main() {
             set_keep_awake,
             set_always_on,
             pick_program,
+            enable_triggers,
             add_app_trigger,
             remove_app_trigger,
             add_dns_trigger,

@@ -84,7 +84,9 @@ an **administrator** PowerShell:
 Import-Certificate -FilePath .\Tunnelik.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
 ```
 
-**3.** Double-click the `.msix`, or:
+**3.** Double-click the `.msix` and approve the administrator prompt (the package carries a
+service, see [Starting on its own](#starting-on-its-own)), or from an **administrator**
+PowerShell:
 
 ```powershell
 Add-AppxPackage .\Tunnelik-<version>-x64.msix
@@ -111,6 +113,7 @@ The same from a terminal:
 | `tunnelik keep-awake <name> on\|off` | Keeps the PC awake while the tunnel is busy (see below) |
 | `tunnelik trigger <name> app <path.exe>` / `dns <suffix>` | Starts the tunnel when that program runs, or a name under that domain is looked up |
 | `tunnelik trigger <name>` / `tunnelik trigger <name> remove <value>` | Lists or removes those |
+| `tunnelik trigger enable\|disable` | Turns "start on its own" on or off (administrator approval) |
 | `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
 | `tunnelik repair` | Recreates VPN profiles Windows dropped (see below) |
 
@@ -134,7 +137,18 @@ minutes ago is left alone. `tunnelik always-on <name>` shows the task's registra
 Windows can also bring a tunnel up when you need it rather than keep it up: the **Start on its
 own** card lists programs and DNS domains that dial the tunnel. Add Remote Desktop, say, and the
 tunnel connects when you launch it; add `corp.example` and looking up any name under it connects
-the tunnel first. These are Windows' own VPN triggers, kept on the tunnel's profile.
+the tunnel first. These are Windows' own VPN triggers.
+
+This one is **off until you turn it on**, because it touches the system: Windows only watches
+for a program or a name on behalf of a profile it was handed through its device-management
+channel, which only the SYSTEM account can reach. Tunnelik ships a small service, `TunnelikMdm`,
+that does that one job for Tunnelik's own package and nothing else; it is installed stopped.
+**Turn on…** in the card (or `tunnelik trigger enable`) starts it, with Windows' administrator
+prompt, and **Turn off** stops it; a restart stops it too, which only matters when the lists
+change, since Windows itself does the dialing. The tunnel that starts on its own gets a
+managed, machine-wide profile: Settings still shows it, but marks it as managed, and every
+account on the PC sees it. Windows watches for one such profile, so one tunnel at a time can
+start on its own, and it has to be disconnected while its list changes.
 
 ### Keeping the PC awake
 

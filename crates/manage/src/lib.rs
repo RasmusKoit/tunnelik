@@ -652,6 +652,8 @@ pub struct Triggers {
     pub dns: Vec<String>,
     /// The other tunnel that holds the triggers, if one does.
     pub elsewhere: Option<String>,
+    /// Whether the feature is turned on: the TunnelikMdm service is running.
+    pub enabled: bool,
 }
 
 pub fn triggers(name: &str) -> Result<Triggers, String> {
@@ -662,6 +664,56 @@ pub fn triggers(name: &str) -> Result<Triggers, String> {
         apps: options.app_triggers,
         dns: options.dns_triggers,
         elsewhere: trigger_holder(&dir).filter(|h| !h.eq_ignore_ascii_case(name)),
+        enabled: triggers_enabled(),
+    })
+}
+
+/// Whether "start on its own" is turned on, which means the TunnelikMdm service is running.
+pub fn triggers_enabled() -> bool {
+    mdm::available()
+}
+
+/// Turns "start on its own" on or off by starting or stopping the TunnelikMdm service, which
+/// takes administrator approval: Windows asks through its own prompt. The package installs
+/// the service stopped and Windows keeps its start type at manual, so it runs from here until
+/// turned off or the PC restarts; the profiles it applied keep working regardless, since
+/// Windows itself does the dialing.
+pub fn enable_triggers(enabled: bool) -> Result<(), String> {
+    if enabled == triggers_enabled() {
+        return Ok(());
+    }
+    let script = if enabled {
+        "Start-Service TunnelikMdm"
+    } else {
+        "Stop-Service TunnelikMdm -Force"
+    };
+    powershell(
+        r#"
+        $ErrorActionPreference = 'Stop'
+        try {
+            $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $env:TUNNELIK_SCRIPT)
+        } catch {
+            [Console]::Error.WriteLine('administrator approval was declined')
+            exit 1
+        }
+        if ($p.ExitCode -ne 0) {
+            [Console]::Error.WriteLine("changing the TunnelikMdm service failed (exit code $($p.ExitCode)); is Tunnelik installed from its package?")
+            exit 1
+        }
+        "#,
+        &[("TUNNELIK_SCRIPT", script)],
+    )?;
+    // The service takes a moment to answer on its pipe.
+    for _ in 0..20 {
+        if triggers_enabled() == enabled {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Err(if enabled {
+        "the TunnelikMdm service did not come up; see C:\\ProgramData\\Tunnelik\\mdm.log".into()
+    } else {
+        "the TunnelikMdm service is still running".into()
     })
 }
 
@@ -721,6 +773,12 @@ pub fn remove_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
 /// disconnected.
 fn set_triggers(name: &str, options: options::Options) -> Result<(), String> {
     let dir = local_state()?;
+    if options.has_triggers() && !triggers_enabled() {
+        return Err(
+            "turn on \"Start on its own\" first; it needs administrator approval once, because Windows keeps such profiles system-wide"
+                .into(),
+        );
+    }
     if options.has_triggers()
         && let Some(holder) = trigger_holder(&dir).filter(|h| !h.eq_ignore_ascii_case(name))
     {

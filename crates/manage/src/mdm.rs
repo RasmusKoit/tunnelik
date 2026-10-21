@@ -7,7 +7,7 @@
 //! in the all-users phonebook as a managed profile. Everything else about the tunnel stays as it
 //! is: the plugin reads the same custom configuration, and `rasdial` dials it like any other.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 
 /// Where the service listens; the same string as in `crates/service`.
 const PIPE: &str = r"\\.\pipe\Tunnelik.Mdm";
@@ -92,8 +92,10 @@ fn call(request: &str) -> Result<String, String> {
     pipe.write_all(request.as_bytes())
         .and_then(|()| pipe.flush())
         .map_err(|e| format!("sending to Tunnelik's helper service: {e}"))?;
+    // One line comes back; reading on past it would only see the server hanging up.
     let mut reply = String::new();
-    pipe.read_to_string(&mut reply)
+    BufReader::new(&pipe)
+        .read_line(&mut reply)
         .map_err(|e| format!("hearing back from Tunnelik's helper service: {e}"))?;
     parse_reply(&reply)
 }

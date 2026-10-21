@@ -156,6 +156,7 @@ main {
 .option input { margin: 0; accent-color: var(--accent); }
 .hint { margin: 2px 0 0 132px; font-size: 12px; color: var(--muted); }
 .hint-lead { margin: 0 0 4px; }
+.hint-inline { margin: 0; align-self: center; }
 
 /* Programs and domains that start the tunnel. */
 .triggers { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }

@@ -4,10 +4,11 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
   xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap5 desktop4 rescap">
+  IgnorableNamespaces="uap uap5 desktop4 desktop6 rescap">
 
-  <Identity Name="RasmusKoit.Tunnelik" Publisher="CN=Rasmus Koit" Version="0.3.3.0" ProcessorArchitecture="x64" />
+  <Identity Name="RasmusKoit.Tunnelik" Publisher="CN=Rasmus Koit" Version="0.3.5.0" ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Tunnelik</DisplayName>
@@ -53,6 +54,16 @@
             <Task Type="systemEvent" />
           </BackgroundTasks>
         </Extension>
+        <!--
+          "Start on its own": Windows dials a tunnel when a program starts or a name is looked up
+          only for a profile handed to it through its MDM channel, which needs SYSTEM. This service
+          does that one job for Tunnelik's own package. It is installed stopped; turning the
+          feature on in the window or with `tunnelik trigger enable` starts it, with the
+          administrator approval that takes. Installing a package with a service needs the same.
+        -->
+        <desktop6:Extension Category="windows.service" Executable="tunnelik_svc.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop6:Service Name="TunnelikMdm" StartupType="manual" StartAccount="localSystem" />
+        </desktop6:Extension>
       </Extensions>
     </Application>
 
@@ -87,6 +98,9 @@
     <!-- Restricted: fine for sideloading, need Microsoft's approval for the Store. -->
     <rescap:Capability Name="networkingVpnProvider" />
     <rescap:Capability Name="runFullTrust" />
+    <!-- The TunnelikMdm service; see the App application. -->
+    <rescap:Capability Name="packagedServices" />
+    <rescap:Capability Name="localSystemServices" />
   </Capabilities>
 
   <!-- Windows requires the background task class to be registered; the DLL exports its factory. -->

@@ -54,6 +54,13 @@
           or when a name under one of these domains is looked up. Windows watches for one tunnel
           at a time, and the tunnel must be disconnected while this list changes.</p>
         <p id="triggers-elsewhere" class="hint hint-lead" hidden></p>
+        <!-- Off by default: it starts a system service, so it asks before touching the system. -->
+        <div id="triggers-off" class="trigger-add" hidden>
+          <button id="triggers-on" class="button primary">Turn on…</button>
+          <span class="hint hint-inline">Starts Tunnelik's helper service, which keeps such a
+            tunnel's profile system-wide, until you turn it off or restart the PC. Windows asks
+            for administrator approval.</span>
+        </div>
         <ul id="d-apps" class="triggers" aria-label="Programs"></ul>
         <div class="trigger-add">
           <button id="add-app" class="button">Add program…</button>
@@ -62,6 +69,8 @@
         <div class="trigger-add">
           <input id="dns-suffix" class="field" placeholder="corp.example" spellcheck="false" autocomplete="off">
           <button id="add-dns" class="button">Add domain</button>
+          <span class="spacer"></span>
+          <button id="triggers-stop" class="linkish" title="Stops the helper service; tunnels keep their lists but no longer start on their own">Turn off</button>
         </div>
       </div>
       <div id="d-peers" class="peers"></div>

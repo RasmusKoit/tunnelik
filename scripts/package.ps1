@@ -30,7 +30,7 @@ if (-not $sdk) { throw 'MakeAppx not found; install the Windows SDK (it comes wi
 
 # cargo reports progress on stderr, which Windows PowerShell would treat as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'
-& cargo build --release --manifest-path "$root\Cargo.toml" -p tunnelik-host -p tunnelik-plugin -p tunnelik-cli -p tunnelik-app
+& cargo build --release --manifest-path "$root\Cargo.toml" -p tunnelik-host -p tunnelik-plugin -p tunnelik-cli -p tunnelik-app -p tunnelik-service
 $ErrorActionPreference = 'Stop'
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
@@ -41,7 +41,7 @@ New-Item -ItemType Directory $stage | Out-Null
 $manifest.Package.Identity.Version = $Version
 $manifest.Save("$stage\AppxManifest.xml")
 Copy-Item -Recurse "$root\package\Assets" $stage
-foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe') {
+foreach ($file in 'tunnelik_host.exe', 'tunnelik_plugin.dll', 'tunnelik.exe', 'tunnelik-app.exe', 'tunnelik_svc.exe') {
     Copy-Item "$root\target\release\$file" $stage
 }
 Copy-Item "$root\README.md", "$root\LICENSE-MIT", "$root\LICENSE-APACHE", "$root\THIRD_PARTY_NOTICES.md" $stage

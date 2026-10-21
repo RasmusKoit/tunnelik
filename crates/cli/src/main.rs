@@ -17,6 +17,7 @@ const USAGE: &str = "usage:
   tunnelik trigger <name> app <path.exe>    start it when that program runs
   tunnelik trigger <name> dns <suffix>      start it when a name under that suffix is looked up
   tunnelik trigger <name> remove <path-or-suffix>
+  tunnelik trigger enable|disable   turn the feature on or off (administrator approval)
   tunnelik repair                   recreate missing VPN connections, e.g. after a reinstall";
 
 #[cfg(windows)]
@@ -90,7 +91,20 @@ fn main() -> ExitCode {
                 }
             })
         }
+        ["trigger", switch @ ("enable" | "disable")] => {
+            let enabled = *switch == "enable";
+            manage::enable_triggers(enabled).map(|()| {
+                if enabled {
+                    println!("Tunnels can now start on their own; add programs or domains with `tunnelik trigger <name> app|dns`.");
+                } else {
+                    println!("Turned off; the TunnelikMdm service is stopped.");
+                }
+            })
+        }
         ["trigger", name] => manage::triggers(name).map(|t| {
+            if !t.enabled {
+                println!("\"Start on its own\" is off; turn it on with `tunnelik trigger enable`.");
+            }
             if t.apps.is_empty() && t.dns.is_empty() {
                 println!("Nothing starts `{name}` on its own.");
             }

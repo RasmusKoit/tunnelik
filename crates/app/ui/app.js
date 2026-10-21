@@ -11,7 +11,8 @@ const ui = {
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
   toggle: $("toggle"), edit: $("edit"), del: $("delete"), keepAwake: $("keep-awake"), alwaysOn: $("always-on"),
   dApps: $("d-apps"), dDns: $("d-dns"), addApp: $("add-app"), addDns: $("add-dns"), dnsSuffix: $("dns-suffix"),
-  triggersElsewhere: $("triggers-elsewhere"),
+  triggersElsewhere: $("triggers-elsewhere"), triggersOff: $("triggers-off"), triggersOn: $("triggers-on"),
+  triggersStop: $("triggers-stop"),
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
   importFile: $("import"), cancel: $("cancel"), save: $("save"), error: $("error"),
   generate: $("generate"), pubkey: $("pubkey"), pubkeyValue: $("pubkey-value"),
@@ -225,7 +226,12 @@ function triggerRow(main, sub, remove) {
 
 function renderTriggers() {
   const t = details.triggers;
-  ui.triggersElsewhere.hidden = !t.elsewhere;
+  // Off: only the switch shows. On: the lists, the add controls and a way to turn it off.
+  ui.triggersOff.hidden = t.enabled;
+  for (const el of [ui.dApps, ui.dDns, ui.addApp.parentElement, ui.addDns.parentElement]) {
+    el.hidden = !t.enabled;
+  }
+  ui.triggersElsewhere.hidden = !t.enabled || !t.elsewhere;
   ui.triggersElsewhere.textContent = t.elsewhere
     ? `Right now "${t.elsewhere}" is the tunnel that starts on its own. Remove its programs and domains to use this one instead.`
     : "";
@@ -327,6 +333,8 @@ function setButtons() {
   const elsewhere = !!details?.triggers?.elsewhere;
   ui.addApp.disabled = busy || elsewhere;
   ui.addDns.disabled = busy || elsewhere || !ui.dnsSuffix.value.trim();
+  ui.triggersOn.disabled = busy;
+  ui.triggersStop.disabled = busy;
   ui.generate.disabled = busy;
 }
 
@@ -503,6 +511,17 @@ ui.addApp.onclick = () => run(async () => {
   const program = await invoke("pick_program");
   if (!program) return;
   await invoke("add_app_trigger", { name: selected, program });
+  await loadDetails(selected);
+});
+// The feature itself is a switch: starting or stopping the helper service, with Windows'
+// administrator prompt in between.
+ui.triggersOn.onclick = () => run(async () => {
+  await invoke("enable_triggers", { enabled: true });
+  await loadDetails(selected);
+});
+ui.triggersStop.onclick = () => run(async () => {
+  if (!confirm("Turn off \"Start on its own\"? Tunnels keep their lists, but none starts on its own until it is turned on again.")) return;
+  await invoke("enable_triggers", { enabled: false });
   await loadDetails(selected);
 });
 ui.dnsSuffix.oninput = setButtons;
