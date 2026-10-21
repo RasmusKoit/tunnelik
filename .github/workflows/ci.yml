@@ -1,0 +1,60 @@
+# Builds and tests every push and pull request. The Windows job also packs an unsigned MSIX so a
+# broken package shows up before a release; tagged releases are signed by release.yml.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # Not -D warnings: the plugin's cdylib build prints a harmless LNK4104 linker warning.
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Test
+        run: cargo test
+
+      # The cache may bring back an older package; only this run's should be uploaded.
+      - name: Pack an unsigned MSIX
+        run: |
+          Remove-Item target\Tunnelik-*-x64.msix -ErrorAction SilentlyContinue
+          pwsh .\scripts\package.ps1 -Unsigned
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Tunnelik-msix-unsigned
+          path: target/Tunnelik-*-x64.msix
+          if-no-files-found: error
+
+  # The crates that build anywhere: the config parser and the plugin's non-Windows modules.
+  portable:
+    name: Portable crates (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p wgconf -p tunnelik-plugin

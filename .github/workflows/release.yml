@@ -1,0 +1,68 @@
+# Publishes a GitHub release with a signed MSIX when a version tag is pushed. The tag must match
+# the version in package\AppxManifest.xml: tag v0.2.8 for version 0.2.8.0.
+#
+# Signing needs two repository secrets, made from the certificate new-cert.ps1 created:
+#   SIGNING_PFX_BASE64    the certificate and its private key as a base64-encoded PFX
+#   SIGNING_PFX_PASSWORD  the PFX's password
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag against the manifest version
+        id: version
+        run: |
+          [xml]$manifest = Get-Content package\AppxManifest.xml
+          $version = $manifest.Package.Identity.Version
+          $expected = 'v' + (($version -split '\.')[0..2] -join '.')
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "Tag $env:GITHUB_REF_NAME does not match the manifest version $version; expected tag $expected"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Write the signing certificate
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+        run: |
+          if (-not $env:SIGNING_PFX_BASE64) { throw 'The SIGNING_PFX_BASE64 secret is not set' }
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\signing.pfx", [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+
+      # Also exports the certificate's public part to target\Tunnelik.cer.
+      - name: Build and sign the package
+        env:
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: pwsh .\scripts\package.ps1 -Pfx $env:RUNNER_TEMP\signing.pfx -PfxPassword $env:SIGNING_PFX_PASSWORD
+
+      - name: Remove the signing certificate
+        if: always()
+        run: Remove-Item -Force "$env:RUNNER_TEMP\signing.pfx" -ErrorAction SilentlyContinue
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            target/Tunnelik-${{ steps.version.outputs.version }}-x64.msix
+            target/Tunnelik.cer
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          # Everything before 1.0 is a pre-release.
+          prerelease: ${{ startsWith(steps.version.outputs.version, '0.') }}
