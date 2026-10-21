@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use tunnelik_plugin::{profile, settings, store};
+use tunnelik_plugin::{options, profile, settings, store};
 
 /// Package name from package/AppxManifest.xml.
 pub const PACKAGE_NAME: &str = "RasmusKoit.Tunnelik";
@@ -37,6 +37,8 @@ impl State {
 pub struct Tunnel {
     pub name: String,
     pub state: State,
+    /// Whether the plugin keeps the PC awake while this tunnel is busy.
+    pub keep_awake: bool,
 }
 
 /// Checks a config the way the plugin will read it, so mistakes show up before saving.
@@ -48,13 +50,25 @@ pub fn validate(config_text: &str) -> Result<(), String> {
 
 pub fn list() -> Result<Vec<Tunnel>, String> {
     let connections = connections()?;
-    Ok(store::list(&local_state()?)
+    let dir = local_state()?;
+    Ok(store::list(&dir)
         .into_iter()
         .map(|name| Tunnel {
             state: state_of(&connections, &name),
+            keep_awake: options::load(&dir, &name).is_ok_and(|o| o.keep_awake),
             name,
         })
         .collect())
+}
+
+/// Switches whether the plugin holds the PC out of idle sleep while `name` carries traffic. A
+/// connected tunnel picks the change up within about ten seconds.
+pub fn set_keep_awake(name: &str, enabled: bool) -> Result<(), String> {
+    ensure_exists(name)?;
+    let dir = local_state()?;
+    let mut options = options::load(&dir, name)?;
+    options.keep_awake = enabled;
+    options::save(&dir, name, &options)
 }
 
 pub fn read(name: &str) -> Result<String, String> {
@@ -70,9 +84,16 @@ pub struct LivePeer {
     pub tx_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveStatus {
+    /// The plugin is holding the PC awake right now because the tunnel is busy.
+    pub keeping_awake: bool,
+    pub peers: Vec<LivePeer>,
+}
+
 /// Live counters for `name`, if it is the tunnel the plugin is running right now. The plugin
 /// rewrites its status every 2 seconds, so anything older belongs to a finished connection.
-pub fn live(name: &str) -> Option<Vec<LivePeer>> {
+pub fn live(name: &str) -> Option<LiveStatus> {
     let text =
         std::fs::read_to_string(local_state().ok()?.join(tunnelik_plugin::live::FILE)).ok()?;
     let live = tunnelik_plugin::live::decode(&text)?;
@@ -83,8 +104,10 @@ pub fn live(name: &str) -> Option<Vec<LivePeer>> {
     if !live.tunnel.eq_ignore_ascii_case(name) || now.saturating_sub(live.updated) > 10 {
         return None;
     }
-    Some(
-        live.peers
+    Some(LiveStatus {
+        keeping_awake: live.keeping_awake,
+        peers: live
+            .peers
             .into_iter()
             .map(|p| LivePeer {
                 public_key: p.public_key,
@@ -93,7 +116,7 @@ pub fn live(name: &str) -> Option<Vec<LivePeer>> {
                 tx_bytes: p.tx_bytes,
             })
             .collect(),
-    )
+    })
 }
 
 /// Recreates missing VPN connections for saved tunnels, and returns their names. Windows deletes
@@ -126,6 +149,8 @@ pub struct Details {
     pub dns_servers: Vec<String>,
     pub dns_search: Vec<String>,
     pub mtu: Option<u16>,
+    /// Whether the plugin keeps the PC awake while the tunnel is busy.
+    pub keep_awake: bool,
     pub peers: Vec<PeerDetails>,
 }
 
@@ -149,6 +174,7 @@ pub fn details(name: &str) -> Result<Details, String> {
         dns_servers: iface.dns_servers.iter().map(ToString::to_string).collect(),
         dns_search: iface.dns_search.clone(),
         mtu: iface.mtu,
+        keep_awake: options::load(&local_state()?, name)?.keep_awake,
         peers: config
             .peers
             .iter()
@@ -231,7 +257,9 @@ pub fn remove(name: &str) -> Result<(), String> {
         disconnect(name)?;
     }
     remove_profile(name, &package_family()?)?;
-    store::remove(&local_state()?, name)
+    let dir = local_state()?;
+    store::remove(&dir, name)?;
+    options::remove(&dir, name)
 }
 
 /// Removes the VPN profile, but only if it is Tunnelik's.

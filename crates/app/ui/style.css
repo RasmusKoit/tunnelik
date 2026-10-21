@@ -139,6 +139,10 @@ main {
 .card-title { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
 .card-actions { margin-top: 12px; padding-left: 132px; }
 
+.option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0 132px; cursor: pointer; }
+.option input { margin: 0; accent-color: var(--accent); }
+.hint { margin: 2px 0 0 132px; font-size: 12px; color: var(--muted); }
+
 .fields {
   display: grid;
   grid-template-columns: 120px 1fr;

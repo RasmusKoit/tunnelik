@@ -54,7 +54,7 @@ Configs are encrypted with DPAPI for your Windows user. The overview never shows
 <td width="33%" valign="top">
 
 ### 🔁 Stays up
-Survives sleep and lock, rekeys on schedule, and reconnects by itself within about five seconds when you switch networks.
+Survives lock and short naps, rekeys on schedule, and reconnects by itself within about five seconds when you switch networks. A per-tunnel option keeps the PC out of sleep while the tunnel is busy.
 
 </td>
 <td width="33%" valign="top">
@@ -106,12 +106,25 @@ The same from a terminal:
 | `tunnelik add <name> <file.conf>` | Adds a tunnel, or replaces its config |
 | `tunnelik up <name>` / `tunnelik down <name>` | Connects / disconnects |
 | `tunnelik list` | Lists tunnels and their state |
+| `tunnelik keep-awake <name> on\|off` | Keeps the PC awake while the tunnel is busy (see below) |
 | `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
 | `tunnelik repair` | Recreates VPN profiles Windows dropped (see below) |
 
 > [!NOTE]
 > Windows runs **one connection per VPN plugin**, so connecting a tunnel disconnects any other
 > Tunnelik tunnel.
+
+### Keeping the PC awake
+
+A laptop left alone goes into Modern Standby on its idle timer, and some minutes into standby
+Windows hangs up every VPN, Tunnelik's included. Tick **Keep this PC awake while the tunnel is
+busy** on a tunnel (or run `tunnelik keep-awake <name> on`) and the plugin holds a
+system-required power request whenever more than about 64 KiB a minute goes through the tunnel,
+the same thing a media player does while it plays. The screen still turns off and the lock screen
+still comes on; only the step into sleep waits until the tunnel has been quiet for a minute.
+Closing the lid and the power button work as before. The option is per tunnel, takes effect
+within seconds, and `powercfg /requests` (from an administrator prompt) lists the request while
+it is held.
 
 <details>
 <summary><b>Good to know</b></summary>
@@ -125,6 +138,8 @@ The same from a terminal:
 - `PreUp`/`PostUp` scripts and `Table = off` are refused rather than ignored; everything else in
   a `wg-quick` config is understood.
 - The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
+- Per-tunnel options such as keep-awake live in plain text next to the encrypted config, as
+  `tunnels\<name>.options` in that same folder.
 
 </details>
 

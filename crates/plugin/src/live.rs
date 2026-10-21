@@ -4,6 +4,7 @@
 //! ```text
 //! tunnel Home
 //! updated 1792512000
+//! awake 1
 //! peer <public key> <last handshake, unix seconds, or -> <bytes received> <bytes sent>
 //! ```
 
@@ -14,6 +15,9 @@ pub struct Live {
     pub tunnel: String,
     /// Unix seconds when the plugin wrote this; old data means the tunnel is gone.
     pub updated: u64,
+    /// Whether the plugin is holding the PC awake right now, because the tunnel is busy and its
+    /// option says to.
+    pub keeping_awake: bool,
     pub peers: Vec<PeerLive>,
 }
 
@@ -28,7 +32,12 @@ pub struct PeerLive {
 }
 
 pub fn encode(live: &Live) -> String {
-    let mut text = format!("tunnel {}\nupdated {}\n", live.tunnel, live.updated);
+    let mut text = format!(
+        "tunnel {}\nupdated {}\nawake {}\n",
+        live.tunnel,
+        live.updated,
+        u8::from(live.keeping_awake)
+    );
     for p in &live.peers {
         let handshake = p
             .last_handshake
@@ -45,6 +54,7 @@ pub fn decode(text: &str) -> Option<Live> {
     let mut live = Live {
         tunnel: String::new(),
         updated: 0,
+        keeping_awake: false,
         peers: Vec::new(),
     };
     for line in text.lines() {
@@ -52,6 +62,7 @@ pub fn decode(text: &str) -> Option<Live> {
         match kind {
             "tunnel" => live.tunnel = rest.to_string(),
             "updated" => live.updated = rest.parse().ok()?,
+            "awake" => live.keeping_awake = rest == "1",
             "peer" => {
                 let fields: Vec<&str> = rest.split(' ').collect();
                 let [key, handshake, rx, tx] = fields.as_slice() else {
@@ -82,6 +93,7 @@ mod tests {
         let live = Live {
             tunnel: "Home VPN".into(),
             updated: 1_792_512_000,
+            keeping_awake: true,
             peers: vec![
                 PeerLive {
                     public_key: "abc+/=".into(),
@@ -98,6 +110,12 @@ mod tests {
             ],
         };
         assert_eq!(decode(&encode(&live)), Some(live));
+    }
+
+    #[test]
+    fn older_files_are_not_keeping_awake() {
+        let live = decode("tunnel x\nupdated 5\n").unwrap();
+        assert!(!live.keeping_awake);
     }
 
     #[test]

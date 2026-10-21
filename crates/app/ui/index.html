@@ -29,6 +29,12 @@
       <div class="card">
         <h2 class="card-title">Interface: <span id="d-name"></span></h2>
         <dl id="d-interface" class="fields"></dl>
+        <label class="option">
+          <input id="keep-awake" type="checkbox">
+          <span>Keep this PC awake while the tunnel is busy</span>
+        </label>
+        <p class="hint">Holds off the idle sleep timer while more than about 64 KiB a minute goes
+          through the tunnel. Closing the lid or pressing the power button still works.</p>
         <div class="card-actions">
           <button id="toggle" class="button primary"></button>
         </div>

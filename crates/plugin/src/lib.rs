@@ -4,11 +4,15 @@
 //! plugin connects. `vpn` holds the Windows side; `profile`, `settings` and `tunnel` are plain
 //! Rust and tested anywhere.
 
+pub mod activity;
 pub mod live;
+pub mod options;
 pub mod profile;
 pub mod settings;
 pub mod tunnel;
 
+#[cfg(windows)]
+mod power;
 #[cfg(windows)]
 pub mod store;
 #[cfg(windows)]

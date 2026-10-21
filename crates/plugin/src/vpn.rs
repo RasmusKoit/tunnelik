@@ -36,9 +36,11 @@ use windows_core::{
 
 use windows::Foundation::{IReference, PropertyValue};
 
+use crate::activity::Activity;
+use crate::power::KeepAwake;
 use crate::tunnel::Tunnel;
 use crate::winrt::{Context, E_FAIL, host_names, read_buffer, write_buffer};
-use crate::{live, profile, settings, store};
+use crate::{live, options, profile, settings, store};
 use wgconf::Endpoint;
 
 /// Class name the package manifest registers for the background task.
@@ -55,6 +57,12 @@ const SETTLE: Duration = Duration::from_secs(5);
 const EXIT_RECONNECT: i32 = 3;
 /// How long a connect waits for a network that is still coming up.
 const NETWORK_WAIT: Duration = Duration::from_secs(20);
+/// A tunnel that carried at least this much in the last minute is busy, and keeps the PC awake
+/// if its option says so. Keepalives, rekeys and DNS lookups add up to a few KiB a minute.
+pub const BUSY_BYTES_PER_MINUTE: u64 = 64 * 1024;
+const BUSY_WINDOW: Duration = Duration::from_secs(60);
+/// Ticks between re-reading the tunnel's options while connected.
+const OPTIONS_REREAD_TICKS: u64 = 40;
 /// First byte of a WireGuard handshake initiation message.
 const HANDSHAKE_INITIATION: u8 = 1;
 
@@ -90,6 +98,11 @@ struct Session {
     /// Set once Start returned. Sending through the channel before that deadlocks.
     started: AtomicBool,
     stop: AtomicBool,
+    /// The tunnel's option to hold the PC out of idle sleep while it is busy. Re-read while
+    /// connected, so switching it takes effect without a reconnect.
+    keep_awake: AtomicBool,
+    /// Whether the timer thread holds the power request right now, for the app's overview.
+    keeping_awake: AtomicBool,
     stats: Stats,
 }
 
@@ -227,6 +240,7 @@ impl Session {
         let text = live::encode(&live::Live {
             tunnel: self.name.clone(),
             updated: now,
+            keeping_awake: self.keeping_awake.load(Ordering::Relaxed),
             peers,
         });
         if let Ok(dir) = local_state() {
@@ -526,12 +540,16 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let text = store::load(&local_state()?, &name)?;
     let config = wgconf::parse(&text).map_err(|e| format!("invalid WireGuard config: {e}"))?;
     let setup = settings::from_config(&config)?;
+    let options = options::load(&local_state()?, &name)?;
     let s = &setup.settings;
     let servers: Vec<String> = s.endpoints.iter().map(ToString::to_string).collect();
     log(
         channel,
         &format!("connecting tunnel `{name}` to {}", servers.join(", ")),
     );
+    if options.keep_awake {
+        file_log("will keep the PC awake while the tunnel is busy");
+    }
 
     let tunnel_addresses: Vec<IpAddr> = s
         .ipv4_addresses
@@ -579,6 +597,8 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         stop: AtomicBool::new(false),
         network_changed: AtomicBool::new(false),
         network_token: AtomicI64::new(0),
+        keep_awake: AtomicBool::new(options.keep_awake),
+        keeping_awake: AtomicBool::new(false),
         stats: Stats::default(),
     });
     *lock(&SESSION) = Some(session.clone());
@@ -703,16 +723,18 @@ fn run_timers(session: &Session) {
     // attempt is unanswered, when the peer was last heard from (or the attempt began).
     let mut handshaken = vec![false; peers];
     let mut unanswered: Vec<Option<(Instant, u64)>> = vec![None; peers];
+    // Bytes through the tunnel lately, and the power request held while there are enough of
+    // them. The request lives on this thread and goes away with it.
+    let mut activity = Activity::new(BUSY_WINDOW);
+    let mut awake: Option<KeepAwake> = None;
+    let mut awake_failed = false;
     while !session.stop.load(Ordering::Relaxed) {
         std::thread::sleep(TICK_INTERVAL);
         ticks += 1;
 
+        let stats = lock(&session.tunnel).peer_stats();
         // Log each completed handshake, to line rekeys up with anything else in the log.
-        let now: Vec<Option<Duration>> = lock(&session.tunnel)
-            .peer_stats()
-            .iter()
-            .map(|p| p.last_handshake)
-            .collect();
+        let now: Vec<Option<Duration>> = stats.iter().map(|p| p.last_handshake).collect();
         for (peer, age) in now.iter().enumerate() {
             let before = handshakes.get(peer).copied().flatten();
             if let Some(age) = age
@@ -727,6 +749,48 @@ fn run_timers(session: &Session) {
         // Status after 1, 3 and 10 seconds, then every minute.
         if matches!(ticks, 4 | 12 | 40) || ticks.is_multiple_of(240) {
             file_log(&session.status());
+        }
+        // Pick up the option being switched in the window or from the command line.
+        if ticks.is_multiple_of(OPTIONS_REREAD_TICKS)
+            && let Ok(dir) = local_state()
+            && let Ok(options) = options::load(&dir, &session.name)
+        {
+            session
+                .keep_awake
+                .store(options.keep_awake, Ordering::Relaxed);
+        }
+        // Once a second: hold the PC awake while the tunnel is busy, and let go once it has been
+        // quiet for a minute.
+        if ticks.is_multiple_of(4) {
+            let total = stats.iter().map(|p| p.rx_bytes + p.tx_bytes).sum();
+            let recent = activity.record(Instant::now(), total);
+            let enabled = session.keep_awake.load(Ordering::Relaxed);
+            let wanted = enabled && recent >= BUSY_BYTES_PER_MINUTE;
+            if wanted && awake.is_none() && !awake_failed {
+                let reason = format!("Tunnelik: tunnel `{}` is busy", session.name);
+                match KeepAwake::new(&reason) {
+                    Ok(request) => {
+                        file_log(&format!(
+                            "keeping the PC awake: {} through the tunnel in the last minute",
+                            human_bytes(recent)
+                        ));
+                        awake = Some(request);
+                    }
+                    Err(e) => {
+                        file_log(&format!("keeping the PC awake failed: {}", e.message()));
+                        awake_failed = true;
+                    }
+                }
+            } else if !wanted && awake.take().is_some() {
+                file_log(if enabled {
+                    "letting the PC sleep again: the tunnel went quiet"
+                } else {
+                    "letting the PC sleep again: the option was switched off"
+                });
+            }
+            session
+                .keeping_awake
+                .store(awake.is_some(), Ordering::Relaxed);
         }
         // The app's overview, every 2 seconds.
         if ticks.is_multiple_of(8) {
@@ -784,6 +848,16 @@ fn run_timers(session: &Session) {
             file_log("exiting so that Windows connects again");
             std::process::exit(EXIT_RECONNECT);
         }
+    }
+}
+
+/// A byte count for the log, rounded the way people read it.
+fn human_bytes(n: u64) -> String {
+    const MIB: u64 = 1 << 20;
+    if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else {
+        format!("{} KiB", n / 1024)
     }
 }
 

@@ -10,6 +10,7 @@ const USAGE: &str = "usage:
   tunnelik up <name>                connect (disconnects any other Tunnelik tunnel)
   tunnelik down <name>              disconnect
   tunnelik list                     list tunnels and whether they are connected
+  tunnelik keep-awake <name> on|off keep the PC awake while the tunnel is busy
   tunnelik repair                   recreate missing VPN connections, e.g. after a reinstall";
 
 #[cfg(windows)]
@@ -35,9 +36,24 @@ fn main() -> ExitCode {
                 println!("No tunnels yet. Add one with: tunnelik add <name> <file.conf>");
             }
             for t in tunnels {
-                println!("{:<24} {}", t.name, t.state.as_str());
+                let note = if t.keep_awake {
+                    "   keeps the PC awake while busy"
+                } else {
+                    ""
+                };
+                println!("{:<24} {}{note}", t.name, t.state.as_str());
             }
         }),
+        ["keep-awake", name, switch @ ("on" | "off")] => {
+            let enabled = *switch == "on";
+            manage::set_keep_awake(name, enabled).map(|()| {
+                if enabled {
+                    println!("`{name}` now keeps the PC awake while it is busy.");
+                } else {
+                    println!("`{name}` no longer keeps the PC awake.");
+                }
+            })
+        }
         ["repair"] => manage::repair().map(|names| {
             if names.is_empty() {
                 println!("Every tunnel has its VPN connection; nothing to repair.");

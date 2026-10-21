@@ -9,7 +9,7 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   list: $("tunnels"), add: $("new"), empty: $("empty"),
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
-  toggle: $("toggle"), edit: $("edit"), del: $("delete"),
+  toggle: $("toggle"), edit: $("edit"), del: $("delete"), keepAwake: $("keep-awake"),
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
   importFile: $("import"), cancel: $("cancel"), save: $("save"), error: $("error"),
 };
@@ -177,10 +177,12 @@ function renderInterface() {
   const state = stateOf(current());
   const status = document.createElement("span");
   status.className = "status";
-  status.append(dot(state), document.createTextNode(
-    { connected: "Active", connecting: "Working…", disconnected: "Inactive" }[state]));
+  let label = { connected: "Active", connecting: "Working…", disconnected: "Inactive" }[state];
+  if (state === "connected" && live?.keepingAwake) label += ", keeping the PC awake";
+  status.append(dot(state), document.createTextNode(label));
 
   ui.dName.textContent = selected;
+  ui.keepAwake.checked = details.keepAwake;
   fields(ui.dInterface, [
     ["Status", status],
     ["Public key", details.publicKey, true],
@@ -194,7 +196,7 @@ function renderInterface() {
   ui.toggle.disabled = busy || state === "connecting";
 }
 
-let live = null;          // per-peer counters while the selected tunnel is connected
+let live = null;          // the plugin's status while the selected tunnel is connected
 
 function renderPeers() {
   ui.dPeers.replaceChildren(...details.peers.map((p) => {
@@ -205,7 +207,7 @@ function renderPeers() {
     title.textContent = "Peer";
     const dl = document.createElement("dl");
     dl.className = "fields";
-    const now = live && live.find((l) => l.publicKey === p.publicKey);
+    const now = live && live.peers.find((l) => l.publicKey === p.publicKey);
     fields(dl, [
       ["Public key", p.publicKey, true],
       ["Preshared key", p.hasPresharedKey ? "enabled" : null],
@@ -247,6 +249,7 @@ async function refreshLive() {
     : null;
   if (JSON.stringify(next) !== JSON.stringify(live)) {
     live = next;
+    renderInterface();
     renderPeers();
   }
 }
@@ -277,6 +280,7 @@ function setButtons() {
   ui.toggle.disabled = busy || stateOf(current()) === "connecting";
   ui.edit.disabled = busy;
   ui.del.disabled = busy;
+  ui.keepAwake.disabled = busy;
 }
 
 async function edit() {
@@ -405,6 +409,18 @@ ui.toggle.onclick = () => {
   const t = current();
   if (t) toggleTunnel(t);
 };
+
+// Saved straight away; a connected tunnel picks it up within seconds.
+ui.keepAwake.onchange = () => run(async () => {
+  const enabled = ui.keepAwake.checked;
+  try {
+    await invoke("set_keep_awake", { name: selected, enabled });
+    details.keepAwake = enabled;
+  } catch (e) {
+    ui.keepAwake.checked = details.keepAwake;
+    throw e;
+  }
+});
 
 // After a reinstall Windows may have dropped the VPN connections; bring them back quietly.
 invoke("repair_profiles")

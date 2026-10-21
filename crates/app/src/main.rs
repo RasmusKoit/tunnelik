@@ -53,6 +53,7 @@ mod commands {
         dns_servers: Vec<String>,
         dns_search: Vec<String>,
         mtu: Option<u16>,
+        keep_awake: bool,
         peers: Vec<Peer>,
     }
 
@@ -78,6 +79,7 @@ mod commands {
                 dns_servers: d.dns_servers,
                 dns_search: d.dns_search,
                 mtu: d.mtu,
+                keep_awake: d.keep_awake,
                 peers: d
                     .peers
                     .into_iter()
@@ -104,6 +106,12 @@ mod commands {
         blocking(move || manage::remove(&name)).await
     }
 
+    /// Switches whether the plugin keeps the PC awake while `name` is busy.
+    #[tauri::command]
+    pub async fn set_keep_awake(name: String, enabled: bool) -> Result<(), String> {
+        blocking(move || manage::set_keep_awake(&name, enabled)).await
+    }
+
     #[tauri::command]
     pub async fn connect(name: String) -> Result<(), String> {
         blocking(move || manage::connect(&name)).await
@@ -123,11 +131,21 @@ mod commands {
         tx_bytes: u64,
     }
 
-    /// Handshake age and bytes per peer while `name` is connected; null otherwise.
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Live {
+        keeping_awake: bool,
+        peers: Vec<LivePeer>,
+    }
+
+    /// Handshake age and bytes per peer while `name` is connected, and whether the plugin is
+    /// keeping the PC awake for it; null while it is not connected.
     #[tauri::command]
-    pub fn tunnel_live(name: String) -> Option<Vec<LivePeer>> {
-        manage::live(&name).map(|peers| {
-            peers
+    pub fn tunnel_live(name: String) -> Option<Live> {
+        manage::live(&name).map(|live| Live {
+            keeping_awake: live.keeping_awake,
+            peers: live
+                .peers
                 .into_iter()
                 .map(|p| LivePeer {
                     public_key: p.public_key,
@@ -135,7 +153,7 @@ mod commands {
                     rx_bytes: p.rx_bytes,
                     tx_bytes: p.tx_bytes,
                 })
-                .collect()
+                .collect(),
         })
     }
 
@@ -177,6 +195,7 @@ fn main() {
             tunnel_live,
             save_tunnel,
             remove_tunnel,
+            set_keep_awake,
             connect,
             disconnect,
             open_link,
