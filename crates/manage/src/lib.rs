@@ -25,7 +25,7 @@ use windows::Networking::Vpn::{VpnManagementAgent, VpnManagementErrorStatus, Vpn
 use windows_core::{HSTRING, Interface};
 
 /// Package name from package/AppxManifest.xml.
-pub const PACKAGE_NAME: &str = "RasmusKoit.Tunnelik";
+pub const PACKAGE_NAME: &str = "dev.koit.Tunnelik";
 /// Application id of the config editor in package/AppxManifest.xml.
 pub const APP_ID: &str = "App";
 

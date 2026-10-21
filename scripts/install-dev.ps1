@@ -26,7 +26,7 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 # Disconnect first: Windows restarts a plugin host that dies while connected, which would bring
 # the old binary back in the middle of the update.
 Get-VpnConnection -ErrorAction SilentlyContinue |
-    Where-Object { $_.PlugInApplicationID -like 'RasmusKoit.Tunnelik_*' -and $_.ConnectionStatus -ne 'Disconnected' } |
+    Where-Object { $_.PlugInApplicationID -like 'dev.koit.Tunnelik_*' -and $_.ConnectionStatus -ne 'Disconnected' } |
     ForEach-Object { rasdial $_.Name /disconnect | Out-Null }
 Get-Process tunnelik_host, tunnelik-app -ErrorAction SilentlyContinue | Stop-Process -Force
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -51,6 +51,6 @@ icacls $out /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'granting app packages access to the package folder failed' }
 
 Add-AppxPackage -Register "$out\AppxManifest.xml" -ForceApplicationShutdown -ForceUpdateFromAnyVersion
-$installed = Get-AppxPackage -Name RasmusKoit.Tunnelik
+$installed = Get-AppxPackage -Name dev.koit.Tunnelik
 Write-Host "Installed $($installed.PackageFullName)"
 Write-Host "Open Tunnelik from the Start menu, or run: tunnelik add <name> <file.conf>"

@@ -168,15 +168,17 @@ it is held.
 - When you **switch networks**, the tunnel comes back on its own, but Windows recreates the VPN
   interface to do it, which cuts connections that were open through the tunnel (SSH, rsync,
   downloads). Pings and new connections carry on.
-- Windows **deletes a plugin's VPN profiles** when the package is uninstalled. The configs
-  survive; `tunnelik repair` (which the window also runs when it opens) brings the profiles back.
+- Windows **may drop or orphan a plugin's VPN profiles** when the package is uninstalled or
+  renamed. The configs survive; `tunnelik repair` (which the window also runs when it opens)
+  brings the profiles back, and a profile left pointing at an old package has to be removed
+  first with `Remove-VpnConnection`.
 - Tunnelik's profiles are ordinary entries in your **own phonebook**, so `Get-VpnConnection`
   and `rasdial` see them too. Windows' VPN management API could keep them in a phonebook of the
   package's own instead, but nothing in Windows' UI lists that one, so Tunnelik only uses that
   API to dial.
 - `PreUp`/`PostUp` scripts and `Table = off` are refused rather than ignored; everything else in
   a `wg-quick` config is understood.
-- The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`,
+- The plugin logs to `%LOCALAPPDATA%\Packages\dev.koit.Tunnelik_<id>\LocalState\plugin.log`,
   which **Log folder** in the window's sidebar opens. Past 1 MiB the log moves aside as
   `plugin.log.1`, so at most 2 MiB stays on disk.
 - Per-tunnel options such as keep-awake live in plain text next to the encrypted config, as
