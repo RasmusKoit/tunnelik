@@ -6,6 +6,7 @@
 
 pub mod activity;
 pub mod live;
+pub mod logfile;
 pub mod markers;
 pub mod notify;
 pub mod options;
@@ -17,6 +18,8 @@ pub mod tunnel;
 mod power;
 #[cfg(windows)]
 pub mod store;
+#[cfg(windows)]
+pub mod trigger;
 #[cfg(windows)]
 mod vpn;
 #[cfg(windows)]

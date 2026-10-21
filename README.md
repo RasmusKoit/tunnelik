@@ -54,7 +54,7 @@ Configs are encrypted with DPAPI for your Windows user. The overview never shows
 <td width="33%" valign="top">
 
 ### 🔁 Stays up
-Rekeys on schedule and reconnects by itself within seconds when you switch networks. Per tunnel: **always on**, so Windows redials it after standby and at sign-in, and **keep the PC awake** while it is busy.
+Rekeys on schedule and reconnects by itself within seconds when you switch networks. Per tunnel: **always on**, so it comes back after standby and at sign-in, and **keep the PC awake** while it is busy.
 
 </td>
 <td width="33%" valign="top">
@@ -96,7 +96,8 @@ Later versions install over it as updates.
 
 Open **Tunnelik** from the Start menu, click **Add tunnel**, paste or import a config, and
 **Save**. The tunnel now appears in Settings → VPN like any other; the switch next to its name in
-Tunnelik does the same thing.
+Tunnelik does the same thing. Starting from scratch? **Generate key** puts a fresh private key
+into the config and shows the public key to give the server side.
 
 The same from a terminal:
 
@@ -106,8 +107,10 @@ The same from a terminal:
 | `tunnelik add <name> <file.conf>` | Adds a tunnel, or replaces its config |
 | `tunnelik up <name>` / `tunnelik down <name>` | Connects / disconnects |
 | `tunnelik list` | Lists tunnels and their state |
-| `tunnelik always-on <name> on\|off` | Lets Windows connect it at sign-in and after it was dropped (see below) |
+| `tunnelik always-on <name> on\|off` | Brings it back after Windows drops it, and at sign-in (see below) |
 | `tunnelik keep-awake <name> on\|off` | Keeps the PC awake while the tunnel is busy (see below) |
+| `tunnelik trigger <name> app <path.exe>` / `dns <suffix>` | Starts the tunnel when that program runs, or a name under that domain is looked up |
+| `tunnelik trigger <name>` / `tunnelik trigger <name> remove <value>` | Lists or removes those |
 | `tunnelik remove <name>` | Removes a tunnel and its VPN profile |
 | `tunnelik repair` | Recreates VPN profiles Windows dropped (see below) |
 
@@ -118,12 +121,20 @@ The same from a terminal:
 ### Always on
 
 A laptop left alone goes into Modern Standby on its idle timer, and some minutes into standby
-Windows hangs up every VPN, Tunnelik's included. Tick **Always on** on a tunnel (or run
-`tunnelik always-on <name> on`) and Windows itself brings it back: at sign-in, and again after
-standby or a network change dropped it, with a toast when it does. This is Windows' own Always On
-VPN, set on the tunnel's profile, so it behaves like any other always-on VPN: turning the tunnel
-off yourself, in Tunnelik, Settings or the flyout, keeps it off until the next sign-in or network
-change.
+Windows hangs up every VPN, Tunnelik's included, and never redials a plugin's. Tick **Always on**
+on a tunnel (or run `tunnelik always-on <name> on`) and Tunnelik brings it back: a small
+background task that Windows runs when the network changes, when you sign in and when you come
+back to the PC dials the tunnel again if it is down, and shows a toast when it did. It behaves
+like Windows' own always-on VPNs: turning the tunnel off yourself, in Tunnelik, Settings or the
+flyout, keeps it off until the next sign-in or network change, and a tunnel dropped less than two
+minutes ago is left alone. `tunnelik always-on <name>` shows the task's registrations.
+
+### Starting on its own
+
+Windows can also bring a tunnel up when you need it rather than keep it up: the **Start on its
+own** card lists programs and DNS domains that dial the tunnel. Add Remote Desktop, say, and the
+tunnel connects when you launch it; add `corp.example` and looking up any name under it connects
+the tunnel first. These are Windows' own VPN triggers, kept on the tunnel's profile.
 
 ### Keeping the PC awake
 
@@ -145,13 +156,15 @@ it is held.
   downloads). Pings and new connections carry on.
 - Windows **deletes a plugin's VPN profiles** when the package is uninstalled. The configs
   survive; `tunnelik repair` (which the window also runs when it opens) brings the profiles back.
-- Tunnelik's profiles live in the **package's own phonebook**, through Windows' VPN management
-  API. Settings and the flyout show them; `Get-VpnConnection` and `rasdial` don't. Tunnels made
-  with versions before 0.3 are moved over by `tunnelik repair` the first time they are seen
-  disconnected.
+- Tunnelik's profiles are ordinary entries in your **own phonebook**, so `Get-VpnConnection`
+  and `rasdial` see them too. Windows' VPN management API could keep them in a phonebook of the
+  package's own instead, but nothing in Windows' UI lists that one, so Tunnelik only uses that
+  API to dial.
 - `PreUp`/`PostUp` scripts and `Table = off` are refused rather than ignored; everything else in
   a `wg-quick` config is understood.
-- The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`.
+- The plugin logs to `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\plugin.log`,
+  which **Log folder** in the window's sidebar opens. Past 1 MiB the log moves aside as
+  `plugin.log.1`, so at most 2 MiB stays on disk.
 - Per-tunnel options such as keep-awake live in plain text next to the encrypted config, as
   `tunnels\<name>.options` in that same folder.
 
@@ -177,10 +190,10 @@ WireGuard protocol and a timer thread for handshakes and keepalives.
      encrypted tunnel store  (DPAPI, per Windows user)
 ```
 
-A VPN profile in Windows holds nothing but the tunnel's name; Tunnelik keeps it in the package's
-own phonebook through Windows' VPN management API, which is also where always-on is set. The
-config itself lives, encrypted, in the package's data folder, where only the same Windows user
-can read it.
+A VPN profile in Windows holds nothing but the tunnel's name. The config itself lives, encrypted,
+in the package's data folder, where only the same Windows user can read it. Always on is a second
+background task in the same DLL, `Tunnelik.TriggerTask`, which the window or the command
+registers with Windows and which redials through the VPN management API.
 
 <details>
 <summary><b>Repository layout</b></summary>

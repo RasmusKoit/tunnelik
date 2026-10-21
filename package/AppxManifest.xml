@@ -7,7 +7,7 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap5 desktop4 rescap">
 
-  <Identity Name="RasmusKoit.Tunnelik" Publisher="CN=Rasmus Koit" Version="0.3.0.0" ProcessorArchitecture="x64" />
+  <Identity Name="RasmusKoit.Tunnelik" Publisher="CN=Rasmus Koit" Version="0.3.3.0" ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Tunnelik</DisplayName>
@@ -43,6 +43,16 @@
             <uap5:ExecutionAlias Alias="tunnelik.exe" />
           </uap5:AppExecutionAlias>
         </uap5:Extension>
+        <!--
+          Always on: the window or the command registers this task on network changes, sign-in
+          and the user coming back, and it redials always-on tunnels Windows dropped. It runs in
+          a background task host of Windows' own, loading the plugin DLL.
+        -->
+        <Extension Category="windows.backgroundTasks" EntryPoint="Tunnelik.TriggerTask">
+          <BackgroundTasks>
+            <Task Type="systemEvent" />
+          </BackgroundTasks>
+        </Extension>
       </Extensions>
     </Application>
 
@@ -85,6 +95,7 @@
       <InProcessServer>
         <Path>tunnelik_plugin.dll</Path>
         <ActivatableClass ActivatableClassId="Tunnelik.VpnBackgroundTask" ThreadingModel="both" />
+        <ActivatableClass ActivatableClassId="Tunnelik.TriggerTask" ThreadingModel="both" />
       </InProcessServer>
     </Extension>
   </Extensions>

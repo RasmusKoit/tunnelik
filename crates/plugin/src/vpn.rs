@@ -338,7 +338,13 @@ fn unix_now() -> u64 {
 
 /// Factory for the background task class, for whichever process Windows loads us into.
 pub fn activation_factory(class: &HSTRING) -> Option<IActivationFactory> {
-    (*class == TASK_CLASS).then(|| Factory.into())
+    if *class == TASK_CLASS {
+        Some(Factory.into())
+    } else if *class == crate::trigger::CLASS {
+        Some(crate::trigger::Factory.into())
+    } else {
+        None
+    }
 }
 
 #[implement(IBackgroundTask)]
@@ -395,6 +401,10 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
     fn Disconnect(&self, channel: Ref<VpnChannel>) -> Result<()> {
         if let Some(session) = current_session() {
             file_log(&session.status());
+            // Whoever asked, the always-on task leaves the tunnel alone for a while.
+            if let Ok(dir) = local_state() {
+                let _ = markers::set(&dir, &session.name, Marker::Dropped);
+            }
         }
         file_log("disconnecting");
         stop_session();
@@ -623,8 +633,9 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     session.started.store(true, Ordering::Relaxed);
     log(channel, "connected");
 
-    // A connect nobody asked for is Windows' always-on bringing the tunnel back: say so.
+    // A connect nobody asked for is always-on bringing the tunnel back: say so.
     if let Ok(dir) = local_state() {
+        markers::take(&dir, &session.name, Marker::Dropped);
         let asked = markers::take(&dir, &session.name, Marker::Dialing);
         if options.always_on && !asked {
             match notify::show(&session.name) {
@@ -715,7 +726,7 @@ fn reachable(endpoint: &Endpoint, tunnel_addresses: &[IpAddr]) -> Result<()> {
     }
 }
 
-fn local_state() -> std::result::Result<PathBuf, String> {
+pub(crate) fn local_state() -> std::result::Result<PathBuf, String> {
     ApplicationData::Current()
         .and_then(|data| data.LocalFolder())
         .and_then(|folder| folder.Path())
@@ -1026,12 +1037,16 @@ fn log(channel: &VpnChannel, message: &str) {
     file_log(message);
 }
 
+/// `plugin.log` moves aside as `plugin.log.1` past this size.
+const LOG_LIMIT: u64 = 1 << 20;
+
 /// Appends to `plugin.log` in the package's data folder. Never log key material here.
 pub fn file_log(message: &str) {
     use std::io::Write;
     let Ok(dir) = local_state() else {
         return;
     };
+    let _ = crate::logfile::rotate(&dir.join("plugin.log"), LOG_LIMIT);
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

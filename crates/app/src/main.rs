@@ -55,7 +55,15 @@ mod commands {
         mtu: Option<u16>,
         keep_awake: bool,
         always_on: bool,
+        triggers: Triggers,
         peers: Vec<Peer>,
+    }
+
+    /// Programs and DNS suffixes that make Windows dial the tunnel.
+    #[derive(Serialize)]
+    pub struct Triggers {
+        apps: Vec<String>,
+        dns: Vec<String>,
     }
 
     #[derive(Serialize)]
@@ -82,6 +90,10 @@ mod commands {
                 mtu: d.mtu,
                 keep_awake: d.keep_awake,
                 always_on: d.always_on,
+                triggers: Triggers {
+                    apps: d.triggers.apps,
+                    dns: d.triggers.dns,
+                },
                 peers: d
                     .peers
                     .into_iter()
@@ -114,10 +126,43 @@ mod commands {
         blocking(move || manage::set_keep_awake(&name, enabled)).await
     }
 
-    /// Switches whether Windows brings `name` up by itself at sign-in and after a drop.
+    /// Switches whether Tunnelik brings `name` back after Windows dropped it, and at sign-in.
     #[tauri::command]
     pub async fn set_always_on(name: String, enabled: bool) -> Result<(), String> {
         blocking(move || manage::set_always_on(&name, enabled)).await
+    }
+
+    /// The native "choose a program" dialog; null when the user cancels.
+    #[tauri::command]
+    pub async fn pick_program() -> Result<Option<String>, String> {
+        blocking(|| {
+            Ok(rfd::FileDialog::new()
+                .set_title("Choose a program that connects this tunnel")
+                .add_filter("Programs", &["exe"])
+                .pick_file()
+                .map(|path| path.display().to_string()))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn add_app_trigger(name: String, program: String) -> Result<(), String> {
+        blocking(move || manage::add_app_trigger(&name, &program)).await
+    }
+
+    #[tauri::command]
+    pub async fn remove_app_trigger(name: String, program: String) -> Result<(), String> {
+        blocking(move || manage::remove_app_trigger(&name, &program)).await
+    }
+
+    #[tauri::command]
+    pub async fn add_dns_trigger(name: String, suffix: String) -> Result<(), String> {
+        blocking(move || manage::add_dns_trigger(&name, &suffix)).await
+    }
+
+    #[tauri::command]
+    pub async fn remove_dns_trigger(name: String, suffix: String) -> Result<(), String> {
+        blocking(move || manage::remove_dns_trigger(&name, &suffix)).await
     }
 
     #[tauri::command]
@@ -185,10 +230,36 @@ mod commands {
             .map_err(|e| format!("opening {url}: {e}"))
     }
 
-    /// Checks a config while it is being edited; fast, so it runs inline.
+    /// Checks a config while it is being edited and returns its public key; fast, so it runs
+    /// inline.
     #[tauri::command]
-    pub fn validate(config: String) -> Result<(), String> {
+    pub fn validate(config: String) -> Result<String, String> {
         manage::validate(&config)
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Generated {
+        config: String,
+        public_key: String,
+    }
+
+    /// Puts a fresh private key into the config being edited. The key only ever travels as
+    /// part of the config text, which the editor already holds.
+    #[tauri::command]
+    pub fn generate_key(config: String) -> Result<Generated, String> {
+        manage::generate_key(&config).map(|(config, public_key)| Generated { config, public_key })
+    }
+
+    #[tauri::command]
+    pub fn open_log_folder() -> Result<(), String> {
+        manage::open_log_folder()
+    }
+
+    /// The installed version, for the window to show; null outside the package.
+    #[tauri::command]
+    pub fn app_version() -> Option<String> {
+        manage::app_version()
     }
 }
 
@@ -205,11 +276,19 @@ fn main() {
             remove_tunnel,
             set_keep_awake,
             set_always_on,
+            pick_program,
+            add_app_trigger,
+            remove_app_trigger,
+            add_dns_trigger,
+            remove_dns_trigger,
             connect,
             disconnect,
             open_link,
             repair_profiles,
-            validate
+            validate,
+            generate_key,
+            open_log_folder,
+            app_version
         ])
         .run(tauri::generate_context!())
         .expect("starting Tunnelik");

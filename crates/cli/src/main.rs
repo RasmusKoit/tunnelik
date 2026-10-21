@@ -11,7 +11,12 @@ const USAGE: &str = "usage:
   tunnelik down <name>              disconnect
   tunnelik list                     list tunnels and whether they are connected
   tunnelik keep-awake <name> on|off keep the PC awake while the tunnel is busy
-  tunnelik always-on <name> on|off  let Windows connect it at sign-in and after it was dropped
+  tunnelik always-on <name> on|off  bring it back after Windows drops it, and at sign-in
+  tunnelik always-on <name>         show whether it is always on, and the task's events
+  tunnelik trigger <name>           list the programs and DNS suffixes that start it
+  tunnelik trigger <name> app <path.exe>    start it when that program runs
+  tunnelik trigger <name> dns <suffix>      start it when a name under that suffix is looked up
+  tunnelik trigger <name> remove <path-or-suffix>
   tunnelik repair                   recreate missing VPN connections, e.g. after a reinstall";
 
 #[cfg(windows)]
@@ -56,12 +61,25 @@ fn main() -> ExitCode {
             let enabled = *switch == "on";
             manage::set_always_on(name, enabled).map(|()| {
                 if enabled {
-                    println!("Windows now connects `{name}` at sign-in and after it was dropped.");
+                    println!("`{name}` is now always on: it comes back after Windows drops it, and at sign-in.");
                 } else {
                     println!("`{name}` is no longer always on.");
                 }
             })
         }
+        ["always-on", name] => manage::always_on(name).and_then(|on| {
+            let events = manage::trigger_events()?;
+            println!(
+                "`{name}` is {}.",
+                if on { "always on" } else { "not always on" }
+            );
+            if events.is_empty() {
+                println!("No always-on task is registered with Windows.");
+            } else {
+                println!("Windows runs the always-on task on: {}", events.join(", "));
+            }
+            Ok(())
+        }),
         ["keep-awake", name, switch @ ("on" | "off")] => {
             let enabled = *switch == "on";
             manage::set_keep_awake(name, enabled).map(|()| {
@@ -72,6 +90,32 @@ fn main() -> ExitCode {
                 }
             })
         }
+        ["trigger", name] => manage::triggers(name).map(|t| {
+            if t.apps.is_empty() && t.dns.is_empty() {
+                println!("Nothing starts `{name}` on its own.");
+            }
+            for app in &t.apps {
+                println!("program  {app}");
+            }
+            for dns in &t.dns {
+                println!("dns      {dns}");
+            }
+        }),
+        ["trigger", name, "app", program] => manage::add_app_trigger(name, program)
+            .map(|()| println!("Starting `{program}` now connects `{name}`.")),
+        ["trigger", name, "dns", suffix] => manage::add_dns_trigger(name, suffix)
+            .map(|()| println!("Looking up a name under `{suffix}` now connects `{name}`.")),
+        ["trigger", name, "remove", value] => manage::triggers(name)
+            .and_then(|t| {
+                if t.apps.iter().any(|a| a.eq_ignore_ascii_case(value)) {
+                    manage::remove_app_trigger(name, value)
+                } else if t.dns.iter().any(|d| d.eq_ignore_ascii_case(value)) {
+                    manage::remove_dns_trigger(name, value)
+                } else {
+                    Err(format!("`{name}` has no trigger `{value}`"))
+                }
+            })
+            .map(|()| println!("`{value}` no longer starts `{name}`.")),
         ["repair"] => manage::repair().map(|names| {
             if names.is_empty() {
                 println!("Every tunnel has its VPN connection; nothing to repair.");

@@ -10,8 +10,11 @@ const ui = {
   list: $("tunnels"), add: $("new"), empty: $("empty"),
   details: $("details"), dName: $("d-name"), dInterface: $("d-interface"), dPeers: $("d-peers"),
   toggle: $("toggle"), edit: $("edit"), del: $("delete"), keepAwake: $("keep-awake"), alwaysOn: $("always-on"),
+  dApps: $("d-apps"), dDns: $("d-dns"), addApp: $("add-app"), addDns: $("add-dns"), dnsSuffix: $("dns-suffix"),
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
   importFile: $("import"), cancel: $("cancel"), save: $("save"), error: $("error"),
+  generate: $("generate"), pubkey: $("pubkey"), pubkeyValue: $("pubkey-value"),
+  version: $("version"), openLog: $("open-log"),
 };
 
 let tunnels = [];
@@ -197,6 +200,38 @@ function renderInterface() {
   ui.toggle.disabled = busy || state === "connecting";
 }
 
+/// A row in the "start on its own" lists, with its remove button.
+function triggerRow(main, sub, remove) {
+  const li = document.createElement("li");
+  const name = document.createElement("span");
+  name.className = "trigger-main";
+  name.textContent = main;
+  const detail = document.createElement("span");
+  detail.className = "trigger-sub";
+  detail.textContent = sub;
+  const button = document.createElement("button");
+  button.className = "button";
+  button.textContent = "Remove";
+  button.setAttribute("aria-label", `Remove ${main}`);
+  button.disabled = busy;
+  button.onclick = () => run(async () => {
+    await remove();
+    await loadDetails(selected);
+  });
+  li.append(name, detail, button);
+  return li;
+}
+
+function renderTriggers() {
+  const t = details.triggers;
+  ui.dApps.replaceChildren(...t.apps.map((program) => triggerRow(
+    program.split(/[\\/]/).pop(), program,
+    () => invoke("remove_app_trigger", { name: selected, program }))));
+  ui.dDns.replaceChildren(...t.dns.map((suffix) => triggerRow(
+    suffix, "any name under this domain",
+    () => invoke("remove_dns_trigger", { name: selected, suffix }))));
+}
+
 let live = null;          // the plugin's status while the selected tunnel is connected
 
 function renderPeers() {
@@ -261,6 +296,7 @@ async function loadDetails(name) {
   live = null;
   show("details");
   renderInterface();
+  renderTriggers();
   renderPeers();
   renderList();
   await refreshLive();
@@ -283,6 +319,9 @@ function setButtons() {
   ui.del.disabled = busy;
   ui.keepAwake.disabled = busy;
   ui.alwaysOn.disabled = busy;
+  ui.addApp.disabled = busy;
+  ui.addDns.disabled = busy || !ui.dnsSuffix.value.trim();
+  ui.generate.disabled = busy;
 }
 
 async function edit() {
@@ -308,6 +347,7 @@ function startNew() {
   ui.config.value = "";
   ui.check.textContent = "";
   ui.check.className = "check";
+  showPublicKey(null);
   renderList();
   setButtons();
   ui.name.focus();
@@ -329,18 +369,27 @@ function validate() {
     if (!text.trim()) {
       ui.check.textContent = "";
       ui.check.className = "check";
+      showPublicKey(null);
       return;
     }
     try {
-      await invoke("validate", { config: text });
+      const publicKey = await invoke("validate", { config: text });
       ui.check.textContent = "✓ Config looks good";
       ui.check.className = "check ok";
+      showPublicKey(publicKey);
     } catch (e) {
       ui.check.textContent = String(e);
       ui.check.className = "check bad";
+      showPublicKey(null);
     }
   }, 250);
   setButtons();
+}
+
+/// The public key of the private key in the box: what the server side needs to know.
+function showPublicKey(key) {
+  ui.pubkey.hidden = !key;
+  ui.pubkeyValue.textContent = key || "";
 }
 
 // ---- Behave like an app, not a web page ----
@@ -389,6 +438,20 @@ ui.importFile.onchange = async () => {
   validate();
 };
 
+// A new private key goes straight into the config box; the public key shows under it.
+ui.generate.onclick = () => run(async () => {
+  if (ui.config.value.includes("PrivateKey") &&
+      !confirm("Replace the private key in this config? Peers will need the new public key.")) {
+    return;
+  }
+  const generated = await invoke("generate_key", { config: ui.config.value });
+  ui.config.value = generated.config;
+  validate();
+});
+
+ui.openLog.onclick = () => invoke("open_log_folder").catch((e) => showError(String(e)));
+invoke("app_version").then((v) => { ui.version.textContent = v ? `v${v}` : ""; }).catch(() => {});
+
 ui.save.onclick = () => run(async () => {
   const name = ui.name.value.trim();
   await invoke("save_tunnel", { name, config: ui.config.value });
@@ -427,6 +490,24 @@ function option(box, command, field) {
 }
 option(ui.keepAwake, "set_keep_awake", "keepAwake");
 option(ui.alwaysOn, "set_always_on", "alwaysOn");
+
+// Programs and domains that start the tunnel. The program comes from a native file dialog,
+// since the page itself never learns real paths.
+ui.addApp.onclick = () => run(async () => {
+  const program = await invoke("pick_program");
+  if (!program) return;
+  await invoke("add_app_trigger", { name: selected, program });
+  await loadDetails(selected);
+});
+ui.dnsSuffix.oninput = setButtons;
+ui.dnsSuffix.onkeydown = (e) => { if (e.key === "Enter" && !ui.addDns.disabled) ui.addDns.click(); };
+ui.addDns.onclick = () => run(async () => {
+  const suffix = ui.dnsSuffix.value.trim();
+  if (!suffix) return;
+  await invoke("add_dns_trigger", { name: selected, suffix });
+  ui.dnsSuffix.value = "";
+  await loadDetails(selected);
+});
 
 // After a reinstall Windows may have dropped the VPN connections; bring them back quietly.
 invoke("repair_profiles")

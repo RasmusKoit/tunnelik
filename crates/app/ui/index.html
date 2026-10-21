@@ -11,6 +11,7 @@
     <header class="brand">
       <h1>Tunnelik</h1>
       <p>A client for WireGuard®</p>
+      <p class="brand-meta"><span id="version"></span><button id="open-log" class="linkish">Log folder</button></p>
     </header>
     <ul id="tunnels" class="tunnels" aria-label="Tunnels"></ul>
     <button id="new" class="button">+ Add tunnel</button>
@@ -46,6 +47,21 @@
           <button id="toggle" class="button primary"></button>
         </div>
       </div>
+      <!-- What makes Windows dial the tunnel on its own; Windows keeps the list on the profile. -->
+      <div class="card">
+        <h2 class="card-title">Start on its own</h2>
+        <p class="hint hint-lead">Windows connects this tunnel when one of these programs starts,
+          or when a name under one of these domains is looked up.</p>
+        <ul id="d-apps" class="triggers" aria-label="Programs"></ul>
+        <div class="trigger-add">
+          <button id="add-app" class="button">Add program…</button>
+        </div>
+        <ul id="d-dns" class="triggers" aria-label="Domains"></ul>
+        <div class="trigger-add">
+          <input id="dns-suffix" class="field" placeholder="corp.example" spellcheck="false" autocomplete="off">
+          <button id="add-dns" class="button">Add domain</button>
+        </div>
+      </div>
       <div id="d-peers" class="peers"></div>
       <div class="details-foot">
         <span class="spacer"></span>
@@ -63,8 +79,10 @@
       <textarea id="config" class="config" spellcheck="false"
         placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.0.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …&#10;AllowedIPs = 10.0.0.0/8&#10;Endpoint = vpn.example.com:51820"></textarea>
       <p id="check" class="check" role="status"></p>
+      <p id="pubkey" class="pubkey" hidden>Public key: <code id="pubkey-value"></code></p>
       <div class="editor-foot">
         <label class="button">Import .conf<input id="import" type="file" accept=".conf,text/plain" hidden></label>
+        <button id="generate" class="button" title="Puts a new private key into the config; give the public key to the server side">Generate key</button>
         <span class="spacer"></span>
         <button id="cancel" class="button">Cancel</button>
         <button id="save" class="button primary">Save</button>

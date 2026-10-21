@@ -37,6 +37,16 @@ pub fn public_key(private: &wgconf::Key) -> wgconf::Key {
     wgconf::Key(PublicKey::from(&StaticSecret::from(private.0)).to_bytes())
 }
 
+/// A fresh private key from the OS's random source, clamped the way `wg genkey` does.
+pub fn generate_private_key() -> Result<wgconf::Key, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| format!("reading random bytes: {e}"))?;
+    bytes[0] &= 248;
+    bytes[31] &= 127;
+    bytes[31] |= 64;
+    Ok(wgconf::Key(bytes))
+}
+
 /// WireGuard's cryptokey routing: a peer may only send from addresses in its AllowedIPs.
 /// BoringTun leaves this check to the caller. Without it a peer could inject packets that look
 /// like they came from, say, the local network's DNS server.
@@ -212,6 +222,20 @@ impl Tunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_keys_are_clamped_and_distinct() {
+        let a = generate_private_key().unwrap();
+        let b = generate_private_key().unwrap();
+        assert_ne!(a.0, b.0);
+        for k in [&a, &b] {
+            assert_eq!(k.0[0] & 7, 0);
+            assert_eq!(k.0[31] & 128, 0);
+            assert_eq!(k.0[31] & 64, 64);
+            let public = public_key(k);
+            assert_eq!(wgconf::Key::from_base64(&public.to_base64()), Some(public));
+        }
+    }
     use wgconf::{Interface, Key, Peer};
 
     fn interface(private: [u8; 32]) -> Interface {

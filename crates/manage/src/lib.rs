@@ -1,12 +1,12 @@
 //! Managing tunnels from outside the VPN plugin, shared by the `tunnelik` command and the app.
 //!
 //! A tunnel is an encrypted config in the package's data folder plus a Windows VPN profile that
-//! points the plugin at it. Profiles are owned through Windows' VPN management API, which keeps
-//! them in the package's own phonebook and is also where always-on lives. That API only answers
-//! a process with package identity: the app, or `tunnelik` through its alias.
+//! points the plugin at it. Connecting goes through Windows (`rasdial`), which starts the plugin.
 //!
-//! Versions before 0.3 created profiles in the user's phonebook with `Add-VpnConnection`. Those
-//! still connect, and `repair` moves each one over the first time it is seen disconnected.
+//! Profiles live in the user's own phonebook, created with `Add-VpnConnection`: that is the only
+//! phonebook Settings and the network flyout list. Windows' VPN management API can create
+//! profiles too, but keeps them in a phonebook of the package's own that no Windows UI shows,
+//! so it is used for nothing but reading and dialing.
 
 #![cfg(windows)]
 
@@ -15,10 +15,12 @@ use std::process::Command;
 
 use tunnelik_plugin::markers::{self, Marker};
 use tunnelik_plugin::{options, profile, settings, store};
-use windows::Foundation::Uri;
+use windows::ApplicationModel::Background::{
+    BackgroundAccessStatus, BackgroundExecutionManager, BackgroundTaskBuilder,
+    BackgroundTaskRegistration, IBackgroundTaskRegistration, SystemTrigger, SystemTriggerType,
+};
 use windows::Networking::Vpn::{VpnManagementAgent, VpnManagementErrorStatus, VpnPlugInProfile};
 use windows_core::{HSTRING, Interface};
-use windows_future::IAsyncOperation;
 
 /// Package name from package/AppxManifest.xml.
 pub const PACKAGE_NAME: &str = "RasmusKoit.Tunnelik";
@@ -49,274 +51,222 @@ pub struct Tunnel {
     pub state: State,
     /// Whether the plugin keeps the PC awake while this tunnel is busy.
     pub keep_awake: bool,
-    /// Whether Windows brings the tunnel up by itself at sign-in and after it was dropped.
+    /// Whether Tunnelik brings the tunnel back by itself after Windows dropped it.
     pub always_on: bool,
 }
 
-/// Checks a config the way the plugin will read it, so mistakes show up before saving.
-pub fn validate(config_text: &str) -> Result<(), String> {
+/// Checks a config the way the plugin will read it, so mistakes show up before saving, and
+/// returns the public key of its private key, which is what the server side needs.
+pub fn validate(config_text: &str) -> Result<String, String> {
     let config = wgconf::parse(config_text).map_err(|e| e.to_string())?;
     settings::from_config(&config)?;
-    Ok(())
+    Ok(tunnelik_plugin::tunnel::public_key(&config.interface.private_key).to_base64())
+}
+
+/// Puts a freshly generated private key into a config being edited, and returns the new text
+/// with the matching public key. An existing `PrivateKey` line in `[Interface]` is replaced;
+/// otherwise one is added right after `[Interface]`, which is added itself to an empty box.
+pub fn generate_key(config_text: &str) -> Result<(String, String), String> {
+    let private = tunnelik_plugin::tunnel::generate_private_key()?;
+    let public = tunnelik_plugin::tunnel::public_key(&private).to_base64();
+    Ok((with_private_key(config_text, &private.to_base64()), public))
+}
+
+/// `config_text` with its `[Interface]` private key set to `key`. Everything else, line endings
+/// included, stays as it was.
+fn with_private_key(config_text: &str, key: &str) -> String {
+    let newline = if config_text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let key_line = format!("PrivateKey = {key}");
+    let mut out: Vec<String> = Vec::new();
+    let mut section = String::new();
+    let mut done = false;
+    for line in config_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            // Leaving [Interface] without having seen a key: add one at its end, before the
+            // blank lines that separate it from the next section.
+            if section.eq_ignore_ascii_case("[interface]") && !done {
+                let blanks = out.iter().rev().take_while(|l| l.trim().is_empty()).count();
+                out.insert(out.len() - blanks, key_line.clone());
+                done = true;
+            }
+            section = trimmed.to_string();
+            out.push(line.to_string());
+            continue;
+        }
+        let is_key = section.eq_ignore_ascii_case("[interface]")
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("PrivateKey"));
+        if is_key && !done {
+            out.push(key_line.clone());
+            done = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !done {
+        if !section.eq_ignore_ascii_case("[interface]") {
+            if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            out.push("[Interface]".to_string());
+        }
+        out.push(key_line);
+    }
+    let mut text = out.join(newline);
+    if config_text.ends_with(newline) || config_text.is_empty() {
+        text.push_str(newline);
+    }
+    text
+}
+
+/// Opens the folder with the plugin's log and status files in Explorer.
+pub fn open_log_folder() -> Result<(), String> {
+    let dir = local_state()?;
+    Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("opening {}: {e}", dir.display()))
+}
+
+/// The installed package's version, as `major.minor.build`.
+pub fn app_version() -> Option<String> {
+    let v = windows::ApplicationModel::Package::Current()
+        .and_then(|p| p.Id())
+        .and_then(|id| id.Version())
+        .ok()?;
+    Some(format_version(v.Major, v.Minor, v.Build))
+}
+
+fn format_version(major: u16, minor: u16, build: u16) -> String {
+    format!("{major}.{minor}.{build}")
 }
 
 pub fn list() -> Result<Vec<Tunnel>, String> {
     let connections = connections()?;
     let dir = local_state()?;
-    let profiles = plugin_profiles().unwrap_or_default();
     Ok(store::list(&dir)
         .into_iter()
-        .map(|name| Tunnel {
-            state: state_of(&connections, &name),
-            keep_awake: options::load(&dir, &name).is_ok_and(|o| o.keep_awake),
-            always_on: find_profile(&profiles, &name)
-                .is_some_and(|p| p.AlwaysOn().unwrap_or(false)),
-            name,
+        .map(|name| {
+            let options = options::load(&dir, &name).unwrap_or_default();
+            Tunnel {
+                state: state_of(&connections, &name),
+                keep_awake: options.keep_awake,
+                always_on: options.always_on,
+                name,
+            }
         })
         .collect())
 }
 
-// ---- Windows' VPN management API ----
-
-fn agent() -> Result<VpnManagementAgent, String> {
-    require_identity()?;
-    VpnManagementAgent::new().map_err(|e| format!("reaching Windows' VPN service: {}", e.message()))
-}
-
-/// The management API answers for the calling package only, so there is no point in asking
-/// without one.
-fn require_identity() -> Result<(), String> {
-    windows::ApplicationModel::Package::Current().map(|_| ()).map_err(|_| {
-        "tunnels can only be managed from the installed Tunnelik: the app, or `tunnelik` in a terminal"
-            .to_string()
-    })
-}
-
-/// Waits for one of the API's operations and turns anything but success into a message.
-fn run(
-    op: windows_core::Result<IAsyncOperation<VpnManagementErrorStatus>>,
-    what: &str,
-) -> Result<(), String> {
-    match status_of(op, what)? {
-        VpnManagementErrorStatus::Ok => Ok(()),
-        status => Err(format!("{what} failed: {}", describe_status(status))),
-    }
-}
-
-fn status_of(
-    op: windows_core::Result<IAsyncOperation<VpnManagementErrorStatus>>,
-    what: &str,
-) -> Result<VpnManagementErrorStatus, String> {
-    op.and_then(|op| op.join())
-        .map_err(|e| format!("{what} failed: {}", e.message()))
-}
-
-/// Tunnelik's own VPN profiles, as the management API lists them. The list includes old-style
-/// profiles from the user's phonebook, which the API can connect but not change; only
-/// `ras_connections` tells the two kinds apart.
-fn plugin_profiles() -> Result<Vec<VpnPlugInProfile>, String> {
-    let family = package_family()?;
-    let profiles = agent()?
-        .GetProfilesAsync()
-        .and_then(|op| op.join())
-        .map_err(|e| format!("listing VPN profiles: {}", e.message()))?;
-    Ok(profiles
-        .into_iter()
-        .filter_map(|profile| profile.cast::<VpnPlugInProfile>().ok())
-        .filter(|profile| {
-            profile
-                .VpnPluginPackageFamilyName()
-                .is_ok_and(|f| f.to_string().eq_ignore_ascii_case(&family))
-        })
-        .collect())
-}
-
-/// VPN profile names compare case-insensitively in Windows.
-fn find_profile<'a>(profiles: &'a [VpnPlugInProfile], name: &str) -> Option<&'a VpnPlugInProfile> {
-    profiles.iter().find(|p| {
-        p.ProfileName()
-            .is_ok_and(|n| n.to_string().eq_ignore_ascii_case(name))
-    })
-}
-
-fn plugin_profile(name: &str) -> Result<VpnPlugInProfile, String> {
-    let profiles = plugin_profiles()?;
-    find_profile(&profiles, name)
-        .cloned()
-        .ok_or_else(|| format!("`{name}` has no VPN connection yet; run `tunnelik repair`"))
-}
-
-/// A fresh profile for `name`: the plugin's package, the tunnel's name as the custom
-/// configuration the plugin reads back, and the first peer's host for Settings to show.
-fn new_profile(name: &str, server: &str) -> Result<VpnPlugInProfile, String> {
-    let family = package_family()?;
-    let build = || -> windows_core::Result<VpnPlugInProfile> {
-        let profile = VpnPlugInProfile::new()?;
-        profile.SetProfileName(&HSTRING::from(name))?;
-        profile.SetVpnPluginPackageFamilyName(&HSTRING::from(family.as_str()))?;
-        profile.SetCustomConfiguration(&HSTRING::from(profile::custom_configuration(name)))?;
-        profile.SetRememberCredentials(true)?;
-        set_server(&profile, server)?;
-        Ok(profile)
-    };
-    build().map_err(|e| format!("preparing the VPN connection: {}", e.message()))
-}
-
-fn set_server(profile: &VpnPlugInProfile, server: &str) -> windows_core::Result<()> {
-    let uris = profile.ServerUris()?;
-    uris.Clear()?;
-    uris.Append(&Uri::CreateUri(&HSTRING::from(server))?)
-}
-
-fn server_of(profile: &VpnPlugInProfile) -> Option<String> {
-    let uris = profile.ServerUris().ok()?;
-    (uris.Size().ok()? == 1)
-        .then(|| uris.GetAt(0).ok()?.RawUri().ok())??
-        .to_string()
-        .into()
-}
-
-/// The URI Windows shows as the connection's server. It is only a label here: the plugin
-/// connects to every peer's endpoint itself.
-fn server_uri(host: &str) -> String {
-    if host.contains(':') && !host.starts_with('[') {
-        format!("https://[{host}]")
-    } else {
-        format!("https://{host}")
-    }
-}
-
-/// The management API's outcomes, in words for the user.
-fn describe_status(status: VpnManagementErrorStatus) -> String {
-    let words = match status {
-        VpnManagementErrorStatus::Ok => "ok",
-        VpnManagementErrorStatus::AccessDenied => "access denied",
-        VpnManagementErrorStatus::CannotFindProfile => "the VPN connection was not found",
-        VpnManagementErrorStatus::AlreadyConnected => "the tunnel is already connected",
-        VpnManagementErrorStatus::AlreadyDisconnecting => "the tunnel is still disconnecting",
-        VpnManagementErrorStatus::NoConnection => "there is no network connection",
-        VpnManagementErrorStatus::ProfileInvalidAppId => "the connection's app id is invalid",
-        VpnManagementErrorStatus::InvalidXmlSyntax => "the connection's settings are malformed",
-        VpnManagementErrorStatus::ProfileNameTooLong => "the name is too long",
-        VpnManagementErrorStatus::DnsNotResolvable => "the server name does not resolve",
-        VpnManagementErrorStatus::ServerConnection => "the server could not be reached",
-        _ => "an unexpected error",
-    };
-    format!("{words} (status {})", status.0)
-}
-
-// ---- Profiles from before 0.3, in the user's own phonebook ----
-
-/// A VPN connection in the user's phonebook: Tunnelik's from before 0.3, or anyone else's.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RasConnection {
-    name: String,
-    ours: bool,
-}
-
-fn ras_connections() -> Result<Vec<RasConnection>, String> {
-    let family = package_family()?;
-    let text = powershell(
-        "Get-VpnConnection -ErrorAction SilentlyContinue | ForEach-Object { \"$($_.Name)`t$($_.PlugInApplicationID)\" }",
-        &[],
-    )?;
-    Ok(parse_ras_connections(&text, &family))
-}
-
-/// One `name<TAB>plugin package family` line per connection; the family is empty for VPNs that
-/// are not plugin based.
-fn parse_ras_connections(text: &str, family: &str) -> Vec<RasConnection> {
-    text.lines()
-        .filter_map(|line| {
-            let (name, plugin) = line.split_once('\t')?;
-            let name = name.trim();
-            (!name.is_empty()).then(|| RasConnection {
-                name: name.to_string(),
-                ours: plugin.trim().eq_ignore_ascii_case(family),
-            })
-        })
-        .collect()
-}
-
-/// Whether `name` is still on a profile from before 0.3.
-fn is_legacy(ras: &[RasConnection], name: &str) -> bool {
-    ras.iter()
-        .any(|c| c.ours && c.name.eq_ignore_ascii_case(name))
-}
-
-/// Makes sure `name` is free for a new profile: no other VPN may have it, and an old-style
-/// Tunnelik profile is removed, unless it is connected right now.
-fn take_over_name(
-    name: &str,
-    ras: &[RasConnection],
-    connections: &[(String, State)],
-) -> Result<(), String> {
-    let Some(existing) = ras.iter().find(|c| c.name.eq_ignore_ascii_case(name)) else {
-        return Ok(());
-    };
-    if !existing.ours {
-        return Err(format!(
-            "A VPN connection named '{name}' already exists and isn't a Tunnelik tunnel. Pick another name."
-        ));
-    }
-    if state_of(connections, name) != State::Disconnected {
-        return Err(format!(
-            "`{name}` is connected through its old profile; disconnect it, then save again"
-        ));
-    }
-    remove_ras_profile(name)
-}
-
-/// Removes an old-style profile, but only if it is Tunnelik's.
-fn remove_ras_profile(name: &str) -> Result<(), String> {
-    powershell(
-        r#"
-        $existing = Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
-        if ($existing -and $existing.PlugInApplicationID -eq $env:TUNNELIK_FAMILY) {
-            Remove-VpnConnection -Name $env:TUNNELIK_NAME -Force -ErrorAction Stop
-        }
-        "#,
-        &[
-            ("TUNNELIK_NAME", name),
-            ("TUNNELIK_FAMILY", &package_family()?),
-        ],
-    )
-    .map(|_| ())
-    .map_err(|e| format!("removing the old VPN connection: {e}"))
-}
-
-// ---- Always on ----
-
-/// Whether Windows brings `name` up by itself: at sign-in, and again after standby or a network
-/// change dropped it.
+/// Whether Tunnelik brings `name` back by itself: at sign-in, and again after standby or a
+/// network change dropped it.
 pub fn always_on(name: &str) -> Result<bool, String> {
-    plugin_profile(name)?
-        .AlwaysOn()
-        .map_err(|e| format!("reading the VPN connection: {}", e.message()))
+    ensure_exists(name)?;
+    Ok(options::load(&local_state()?, name)?.always_on)
 }
 
-/// Switches Windows' own always-on behaviour for `name`. A deliberate disconnect still sticks
-/// until the next sign-in or network change, the same as for any always-on VPN.
+/// Switches always-on for `name`. A deliberate disconnect still sticks until the next sign-in
+/// or network change, the same as for Windows' own always-on VPNs.
 pub fn set_always_on(name: &str, enabled: bool) -> Result<(), String> {
     ensure_exists(name)?;
-    if is_legacy(&ras_connections()?, name) {
-        return Err(format!(
-            "`{name}` still uses its old-style VPN connection, which Windows can't switch to always on; disconnect it and run `tunnelik repair` (the window does that when it opens), then try again"
-        ));
-    }
-    let profile = plugin_profile(name)?;
-    profile
-        .SetAlwaysOn(enabled)
-        .map_err(|e| format!("updating the VPN connection: {}", e.message()))?;
-    run(
-        agent()?.UpdateProfileFromObjectAsync(&profile),
-        "updating the VPN connection",
-    )?;
-    // The plugin reads this copy to tell a redial by Windows from one the user asked for.
     let dir = local_state()?;
     let mut options = options::load(&dir, name)?;
     options.always_on = enabled;
-    options::save(&dir, name, &options)
+    options::save(&dir, name, &options)?;
+    let any = store::list(&dir)
+        .iter()
+        .any(|n| options::load(&dir, n).is_ok_and(|o| o.always_on));
+    sync_trigger_task(any)
+}
+
+/// The events Windows runs the always-on task on, with the names the registrations carry.
+const TRIGGERS: [(&str, SystemTriggerType); 3] = [
+    (
+        "Tunnelik: network changed",
+        SystemTriggerType::NetworkStateChange,
+    ),
+    ("Tunnelik: signed in", SystemTriggerType::SessionConnected),
+    ("Tunnelik: user is back", SystemTriggerType::UserPresent),
+];
+
+/// Registers the always-on task while any tunnel is always on, and unregisters it once none
+/// is. Registrations outlive the process and package updates, so missing ones are added and
+/// present ones left alone.
+fn sync_trigger_task(wanted: bool) -> Result<(), String> {
+    let registered = trigger_registrations()?;
+    if wanted {
+        let access = BackgroundExecutionManager::RequestAccessAsync()
+            .and_then(|op| op.join())
+            .map_err(|e| {
+                format!(
+                    "asking Windows to run tasks in the background: {}",
+                    e.message()
+                )
+            })?;
+        if matches!(
+            access,
+            BackgroundAccessStatus::Denied
+                | BackgroundAccessStatus::DeniedBySystemPolicy
+                | BackgroundAccessStatus::DeniedByUser
+        ) {
+            return Err(
+                "Windows does not let Tunnelik run in the background; check Settings > Apps > Tunnelik > Background apps permissions"
+                    .into(),
+            );
+        }
+        for (name, kind) in TRIGGERS {
+            if registered.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            let register = || -> windows_core::Result<()> {
+                let builder = BackgroundTaskBuilder::new()?;
+                builder.SetName(&HSTRING::from(name))?;
+                builder.SetTaskEntryPoint(&HSTRING::from(tunnelik_plugin::trigger::CLASS))?;
+                builder.SetTrigger(&SystemTrigger::Create(kind, false)?)?;
+                builder.Register()?;
+                Ok(())
+            };
+            register().map_err(|e| format!("registering `{name}`: {}", e.message()))?;
+        }
+    } else {
+        for (name, registration) in registered {
+            registration
+                .Unregister(true)
+                .map_err(|e| format!("unregistering `{name}`: {}", e.message()))?;
+        }
+    }
+    Ok(())
+}
+
+fn trigger_registrations() -> Result<Vec<(String, IBackgroundTaskRegistration)>, String> {
+    let all = BackgroundTaskRegistration::AllTasks()
+        .map_err(|e| format!("listing background tasks: {}", e.message()))?;
+    Ok(all
+        .into_iter()
+        .filter_map(|pair| {
+            let registration = pair.Value().ok()?;
+            let name = registration.Name().ok()?.to_string();
+            TRIGGERS
+                .iter()
+                .any(|(n, _)| *n == name)
+                .then_some((name, registration))
+        })
+        .collect())
+}
+
+/// The always-on task's registered events, for `tunnelik always-on <name>` to show.
+pub fn trigger_events() -> Result<Vec<String>, String> {
+    Ok(trigger_registrations()?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// Switches whether the plugin holds the PC out of idle sleep while `name` carries traffic. A
@@ -377,34 +327,69 @@ pub fn live(name: &str) -> Option<LiveStatus> {
     })
 }
 
-/// Gives every saved tunnel its VPN connection, and returns the names of those it had to
-/// create. Windows deletes a plugin's connections when the package is uninstalled (say, when
-/// moving from a development install to the signed package), while the encrypted configs
-/// survive. Tunnels still on an old-style profile are moved over here too, once they are
-/// disconnected; a connected one keeps its old profile until next time.
+/// Recreates missing VPN connections for saved tunnels, and returns their names. Windows deletes
+/// a VPN plugin's connections when the plugin's package is uninstalled (say, when moving from a
+/// development install to the signed package), while the encrypted configs survive. Profiles a
+/// 0.3.0 pre-release kept in the package's own phonebook are retired on the way, once they are
+/// disconnected.
 pub fn repair() -> Result<Vec<String>, String> {
-    let dir = local_state()?;
-    let profiles = plugin_profiles()?;
-    let legacy: Vec<String> = ras_connections()?
-        .into_iter()
-        .filter(|c| c.ours)
-        .map(|c| c.name)
-        .collect();
+    let family = package_family()?;
+    let existing = powershell(
+        "(Get-VpnConnection | Where-Object PlugInApplicationID -eq $env:TUNNELIK_FAMILY).Name",
+        &[("TUNNELIK_FAMILY", &family)],
+    )?;
+    let existing: Vec<&str> = existing.lines().map(str::trim).collect();
     let connections = connections()?;
 
     let mut repaired = Vec::new();
-    for name in store::list(&dir) {
-        let listed = find_profile(&profiles, &name).is_some();
-        let native = listed && !legacy.iter().any(|l| l.eq_ignore_ascii_case(&name));
-        if native || state_of(&connections, &name) != State::Disconnected {
-            continue;
+    for name in store::list(&local_state()?) {
+        let connected = state_of(&connections, &name) != State::Disconnected;
+        let in_phonebook = existing.iter().any(|e| e.eq_ignore_ascii_case(&name));
+        if !in_phonebook && !connected {
+            retire_hidden_profile(&name)?;
+            save(&name, &read(&name)?)?;
+            repaired.push(name);
         }
-        // Still on an old-style profile, or without one at all: `save` retires the old profile
-        // and creates the new one.
-        save(&name, &read(&name)?)?;
-        repaired.push(name);
     }
     Ok(repaired)
+}
+
+/// Deletes a profile the VPN management API created for `name` in the package's own phonebook,
+/// where no Windows UI can see it. Nothing happens when there is none.
+fn retire_hidden_profile(name: &str) -> Result<(), String> {
+    let Ok(agent) = VpnManagementAgent::new() else {
+        return Ok(());
+    };
+    let family = package_family()?;
+    let profiles = agent
+        .GetProfilesAsync()
+        .and_then(|op| op.join())
+        .map_err(|e| format!("listing VPN profiles: {}", e.message()))?;
+    for profile in profiles {
+        let Ok(profile) = profile.cast::<VpnPlugInProfile>() else {
+            continue;
+        };
+        let ours = profile
+            .VpnPluginPackageFamilyName()
+            .is_ok_and(|f| f.to_string().eq_ignore_ascii_case(&family));
+        let same = profile
+            .ProfileName()
+            .is_ok_and(|n| n.to_string().eq_ignore_ascii_case(name));
+        if !(ours && same) {
+            continue;
+        }
+        let status = agent
+            .DeleteProfileAsync(&profile)
+            .and_then(|op| op.join())
+            .map_err(|e| format!("removing the hidden VPN profile: {}", e.message()))?;
+        if status != VpnManagementErrorStatus::Ok {
+            return Err(format!(
+                "removing the hidden VPN profile for `{name}` failed with status {}",
+                status.0
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A tunnel's settings without its secrets: safe to show while browsing tunnels.
@@ -418,8 +403,10 @@ pub struct Details {
     pub mtu: Option<u16>,
     /// Whether the plugin keeps the PC awake while the tunnel is busy.
     pub keep_awake: bool,
-    /// Whether Windows brings the tunnel up by itself; see `always_on`.
+    /// Whether Tunnelik brings the tunnel back by itself; see `always_on`.
     pub always_on: bool,
+    /// What makes Windows dial the tunnel on its own; see `triggers`.
+    pub triggers: Triggers,
     pub peers: Vec<PeerDetails>,
 }
 
@@ -436,6 +423,7 @@ pub fn details(name: &str) -> Result<Details, String> {
     let config = wgconf::parse(&read(name)?).map_err(|e| e.to_string())?;
     let iface = &config.interface;
     let strings = |items: &[wgconf::IpNet]| items.iter().map(ToString::to_string).collect();
+    let options = options::load(&local_state()?, name)?;
     Ok(Details {
         public_key: tunnelik_plugin::tunnel::public_key(&iface.private_key).to_base64(),
         listen_port: iface.listen_port,
@@ -443,8 +431,9 @@ pub fn details(name: &str) -> Result<Details, String> {
         dns_servers: iface.dns_servers.iter().map(ToString::to_string).collect(),
         dns_search: iface.dns_search.clone(),
         mtu: iface.mtu,
-        keep_awake: options::load(&local_state()?, name)?.keep_awake,
-        always_on: always_on(name).unwrap_or(false),
+        keep_awake: options.keep_awake,
+        always_on: options.always_on,
+        triggers: triggers(name)?,
         peers: config
             .peers
             .iter()
@@ -466,61 +455,58 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
     validate(config_text)?;
     let config = wgconf::parse(config_text).map_err(|e| e.to_string())?;
     let s = settings::from_config(&config)?.settings;
-    let server = server_uri(&s.endpoints[0].host);
-    let dir = local_state()?;
-    let profiles = plugin_profiles()?;
-    let ras = ras_connections()?;
+    let full_tunnel =
+        s.ipv4_routes.iter().any(|r| r.1 == 0) || s.ipv6_routes.iter().any(|r| r.1 == 0);
 
-    // The VPN profile comes first: if the name belongs to another VPN, nothing gets saved. An
-    // old-style profile can't be updated in place, so it counts as not there.
-    let native = find_profile(&profiles, name).filter(|_| !is_legacy(&ras, name));
-    let created = match native {
-        Some(existing) => {
-            if server_of(existing).as_deref() != Some(server.as_str()) {
-                set_server(existing, &server)
-                    .map_err(|e| format!("updating the VPN connection: {}", e.message()))?;
-                run(
-                    agent()?.UpdateProfileFromObjectAsync(existing),
-                    "updating the VPN connection",
-                )?;
+    let family = package_family()?;
+
+    // The VPN profile comes first: if the name already belongs to another VPN, nothing gets
+    // saved. Values travel as environment variables, so nothing in them is parsed as PowerShell.
+    let outcome = powershell(
+        r#"
+        $ErrorActionPreference = 'Stop'
+        $split = $env:TUNNELIK_SPLIT -eq '1'
+        $existing = Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+        if ($existing) {
+            if ($existing.PlugInApplicationID -ne $env:TUNNELIK_FAMILY) {
+                [Console]::Error.WriteLine("A VPN connection named '$($env:TUNNELIK_NAME)' already exists and isn't a Tunnelik tunnel. Pick another name.")
+                exit 2
             }
-            false
+            if ($existing.ServerAddress -ne $env:TUNNELIK_SERVER -or $existing.SplitTunneling -ne $split) {
+                try {
+                    Set-VpnConnection -Name $env:TUNNELIK_NAME -ServerAddress $env:TUNNELIK_SERVER -SplitTunneling $split -Force
+                } catch {
+                    [Console]::Error.WriteLine("Couldn't update the VPN connection (disconnect it first?): $($_.Exception.Message)")
+                    exit 1
+                }
+            }
+            'updated'
+        } else {
+            Add-VpnConnection -Name $env:TUNNELIK_NAME -ServerAddress $env:TUNNELIK_SERVER `
+                -PlugInApplicationID $env:TUNNELIK_FAMILY -CustomConfiguration ([xml]$env:TUNNELIK_PROFILE) `
+                -SplitTunneling:$split -Force | Out-Null
+            'created'
         }
-        None => {
-            take_over_name(name, &ras, &connections()?)?;
-            let profile = new_profile(name, &server)?;
-            run(
-                agent()?.AddProfileFromObjectAsync(&profile),
-                "adding the VPN connection",
-            )?;
-            true
-        }
-    };
+        "#,
+        &[
+            ("TUNNELIK_NAME", name),
+            // Shown in Settings; the plugin connects to every peer's endpoint itself.
+            ("TUNNELIK_SERVER", &s.endpoints[0].host),
+            ("TUNNELIK_FAMILY", &family),
+            ("TUNNELIK_PROFILE", &profile::custom_configuration(name)),
+            ("TUNNELIK_SPLIT", if full_tunnel { "0" } else { "1" }),
+        ],
+    )?;
 
     // Without its config a new profile would be a tunnel that can never connect, so take it
     // back out if saving fails.
-    if let Err(e) = store::save(&dir, name, config_text) {
-        if created {
-            let _ = delete_profile(name);
+    if let Err(e) = local_state().and_then(|dir| store::save(&dir, name, config_text)) {
+        if outcome == "created" {
+            let _ = remove_profile(name, &family);
         }
         return Err(e);
     }
     Ok(())
-}
-
-/// Removes `name`'s VPN connection, whichever phonebook it is in; other VPNs are never touched.
-fn delete_profile(name: &str) -> Result<(), String> {
-    if is_legacy(&ras_connections()?, name) {
-        return remove_ras_profile(name);
-    }
-    let profiles = plugin_profiles()?;
-    match find_profile(&profiles, name) {
-        Some(profile) => run(
-            agent()?.DeleteProfileAsync(profile),
-            "removing the VPN connection",
-        ),
-        None => Ok(()),
-    }
 }
 
 /// Removes one of Tunnelik's own tunnels; other VPN connections are never touched.
@@ -529,11 +515,27 @@ pub fn remove(name: &str) -> Result<(), String> {
     if state_of(&connections()?, name) != State::Disconnected {
         disconnect(name)?;
     }
-    delete_profile(name)?;
+    remove_profile(name, &package_family()?)?;
+    retire_hidden_profile(name)?;
     let dir = local_state()?;
     store::remove(&dir, name)?;
     markers::clear(&dir, name);
     options::remove(&dir, name)
+}
+
+/// Removes the VPN profile, but only if it is Tunnelik's.
+fn remove_profile(name: &str, family: &str) -> Result<(), String> {
+    powershell(
+        r#"
+        $existing = Get-VpnConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+        if ($existing -and $existing.PlugInApplicationID -eq $env:TUNNELIK_FAMILY) {
+            Remove-VpnConnection -Name $env:TUNNELIK_NAME -Force -ErrorAction Stop
+        }
+        "#,
+        &[("TUNNELIK_NAME", name), ("TUNNELIK_FAMILY", family)],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("removing the VPN connection: {e}"))
 }
 
 /// Connects a tunnel, first disconnecting any other Tunnelik tunnel: Windows runs only one
@@ -541,7 +543,6 @@ pub fn remove(name: &str) -> Result<(), String> {
 pub fn connect(name: &str) -> Result<(), String> {
     ensure_exists(name)?;
     let dir = local_state()?;
-    let profile = plugin_profile(name)?;
     let ours = store::list(&dir);
     for (other, state) in connections()? {
         let is_ours = ours.iter().any(|n| n.eq_ignore_ascii_case(&other));
@@ -549,28 +550,158 @@ pub fn connect(name: &str) -> Result<(), String> {
             disconnect(&other)?;
         }
     }
-    // So the plugin knows this connect was asked for, rather than Windows redialing on its own.
+    // Connecting on purpose ends any earlier "leave it down"; the dialing marker tells the plugin
+    // this connect was asked for, rather than Tunnelik bringing the tunnel back on its own.
+    markers::take(&dir, name, Marker::Stopped);
     markers::set(&dir, name, Marker::Dialing)?;
-    let result = match status_of(agent()?.ConnectProfileAsync(&profile), "connecting")? {
-        VpnManagementErrorStatus::Ok | VpnManagementErrorStatus::AlreadyConnected => Ok(()),
-        status => Err(format!("connecting failed: {}", describe_status(status))),
-    };
+    let result = rasdial(&[name]);
     if result.is_err() {
         markers::take(&dir, name, Marker::Dialing);
     }
     result
 }
 
+/// Disconnects on purpose: an always-on tunnel then stays down until the next sign-in or
+/// network change, like Windows' own always-on VPNs.
 pub fn disconnect(name: &str) -> Result<(), String> {
     ensure_exists(name)?;
-    if state_of(&connections()?, name) == State::Disconnected {
-        return Ok(());
+    markers::set(&local_state()?, name, Marker::Stopped)?;
+    rasdial(&[name, "/disconnect"])
+}
+
+// ---- Triggers: programs and DNS suffixes that make Windows dial the tunnel ----
+
+/// What makes Windows bring a tunnel up on its own: starting one of these programs, or looking
+/// up a name under one of these DNS suffixes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Triggers {
+    /// Full paths of programs.
+    pub apps: Vec<String>,
+    /// DNS suffixes, lower case.
+    pub dns: Vec<String>,
+}
+
+pub fn triggers(name: &str) -> Result<Triggers, String> {
+    ensure_exists(name)?;
+    let text = powershell(
+        r#"
+        $t = Get-VpnConnectionTrigger -ConnectionName $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+        foreach ($a in $t.ApplicationID) { "app`t$a" }
+        foreach ($d in $t.dnsConfig) { "dns`t$($d.DnsSuffix)" }
+        "#,
+        &[("TUNNELIK_NAME", name)],
+    )?;
+    Ok(parse_triggers(&text))
+}
+
+/// One `app<TAB>path` or `dns<TAB>suffix` line per trigger. Windows stores a suffix with a
+/// leading dot; it is shown without.
+fn parse_triggers(text: &str) -> Triggers {
+    let mut triggers = Triggers::default();
+    for line in text.lines() {
+        match line.split_once('\t') {
+            Some(("app", path)) if !path.trim().is_empty() => {
+                triggers.apps.push(path.trim().to_string())
+            }
+            Some(("dns", suffix)) if !suffix.trim().trim_start_matches('.').is_empty() => triggers
+                .dns
+                .push(suffix.trim().trim_start_matches('.').to_string()),
+            _ => {}
+        }
     }
-    if is_legacy(&ras_connections()?, name) {
-        return rasdial(&[name, "/disconnect"]);
+    triggers
+}
+
+/// Makes starting `program` bring `name` up. The path must point at an existing `.exe`.
+pub fn add_app_trigger(name: &str, program: &str) -> Result<(), String> {
+    ensure_exists(name)?;
+    let program = validate_program_path(program)?;
+    trigger_command(
+        "Add-VpnConnectionTriggerApplication -ConnectionName $env:TUNNELIK_NAME -ApplicationID $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
+        name,
+        &program,
+    )
+}
+
+pub fn remove_app_trigger(name: &str, program: &str) -> Result<(), String> {
+    ensure_exists(name)?;
+    trigger_command(
+        "Remove-VpnConnectionTriggerApplication -ConnectionName $env:TUNNELIK_NAME -ApplicationID $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
+        name,
+        program,
+    )
+}
+
+/// Makes looking up any name under `suffix` bring `name` up.
+pub fn add_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
+    ensure_exists(name)?;
+    let suffix = validate_dns_suffix(suffix)?;
+    trigger_command(
+        "Add-VpnConnectionTriggerDnsConfiguration -ConnectionName $env:TUNNELIK_NAME -DnsSuffix $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
+        name,
+        &suffix,
+    )
+}
+
+pub fn remove_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
+    ensure_exists(name)?;
+    // Windows knows the suffix with its leading dot.
+    let stored = format!(".{}", validate_dns_suffix(suffix)?);
+    trigger_command(
+        "Remove-VpnConnectionTriggerDnsConfiguration -ConnectionName $env:TUNNELIK_NAME -DnsSuffix $env:TUNNELIK_VALUE -Force -ErrorAction Stop",
+        name,
+        &stored,
+    )
+}
+
+fn trigger_command(script: &str, name: &str, value: &str) -> Result<(), String> {
+    powershell(
+        script,
+        &[("TUNNELIK_NAME", name), ("TUNNELIK_VALUE", value)],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("changing the tunnel's triggers: {e}"))
+}
+
+/// A program for an app trigger: an absolute path to an existing `.exe`, with nothing in it that
+/// could trip up the shell.
+fn validate_program_path(program: &str) -> Result<String, String> {
+    let program = program.trim();
+    let path = std::path::Path::new(program);
+    if program.is_empty() || program.contains(['"', '\n', '\r']) {
+        return Err("the program path contains characters that are not allowed".into());
     }
-    let profile = plugin_profile(name)?;
-    run(agent()?.DisconnectProfileAsync(&profile), "disconnecting")
+    if !path.is_absolute() {
+        return Err(format!(
+            "`{program}` is not a full path; use one like C:\\Tools\\app.exe"
+        ));
+    }
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        return Err(format!("`{program}` is not a program (.exe)"));
+    }
+    if !path.is_file() {
+        return Err(format!("`{program}` does not exist"));
+    }
+    Ok(program.to_string())
+}
+
+/// A DNS suffix for a name trigger: `corp.example`, lower case, no spaces or shell characters.
+fn validate_dns_suffix(suffix: &str) -> Result<String, String> {
+    let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
+    let ok = !suffix.is_empty()
+        && suffix.split('.').all(|label| {
+            !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+    if ok {
+        Ok(suffix)
+    } else {
+        Err(format!(
+            "`{suffix}` is not a DNS suffix; use one like corp.example"
+        ))
+    }
 }
 
 fn ensure_exists(name: &str) -> Result<(), String> {
@@ -600,8 +731,7 @@ fn state_of(connections: &[(String, State)], name: &str) -> State {
         .map_or(State::Disconnected, |(_, s)| *s)
 }
 
-/// All VPN connections Windows currently has open or is opening, with their state. Whichever
-/// phonebook a profile lives in, its connection shows up here.
+/// All VPN connections Windows currently has open or is opening, with their state.
 fn connections() -> Result<Vec<(String, State)>, String> {
     use windows::Win32::NetworkManagement::Rras::{
         RASCONNSTATUSW, RASCONNW, RASCS_Connected, RASCS_Disconnected, RasEnumConnectionsW,
@@ -658,7 +788,6 @@ fn connections() -> Result<Vec<(String, State)>, String> {
         .collect())
 }
 
-/// Only old-style profiles are dialed this way; the management API does not see them.
 fn rasdial(args: &[&str]) -> Result<(), String> {
     let out = hidden(Command::new("rasdial.exe"))
         .args(args)
@@ -735,54 +864,125 @@ mod tests {
     use super::*;
 
     #[test]
-    fn describes_the_statuses_the_user_can_hit() {
-        for (status, words) in [
-            (VpnManagementErrorStatus::Ok, "ok"),
-            (VpnManagementErrorStatus::AccessDenied, "access denied"),
-            (VpnManagementErrorStatus::CannotFindProfile, "not found"),
-            (
-                VpnManagementErrorStatus::AlreadyConnected,
-                "already connected",
-            ),
-            (VpnManagementErrorStatus::NoConnection, "no network"),
-            (VpnManagementErrorStatus::Other, "unexpected"),
-            (VpnManagementErrorStatus(999), "unexpected"),
-        ] {
-            assert!(describe_status(status).contains(words), "{status:?}");
-        }
+    fn formats_versions() {
+        assert_eq!(format_version(0, 3, 3), "0.3.3");
+        assert_eq!(format_version(1, 0, 0), "1.0.0");
     }
 
     #[test]
-    fn server_uris() {
-        assert_eq!(server_uri("vpn.example.com"), "https://vpn.example.com");
-        assert_eq!(server_uri("203.0.113.10"), "https://203.0.113.10");
-        assert_eq!(server_uri("2001:db8::1"), "https://[2001:db8::1]");
-        assert_eq!(server_uri("[2001:db8::1]"), "https://[2001:db8::1]");
-    }
-
-    #[test]
-    fn parses_the_phonebook_listing() {
-        let family = "RasmusKoit.Tunnelik_abc";
-        let text =
-            "Infra\tRasmusKoit.Tunnelik_abc\nWork VPN\t\n\n  \tsomething\nOther\tVendor.App_xyz\n";
-        let listed = parse_ras_connections(text, family);
+    fn puts_the_private_key_where_it_belongs() {
+        let key = "KEY=";
+        // Replaces, keeping everything else and the line endings.
+        let text = "[Interface]\r\nPrivateKey = old\r\nAddress = 10.0.0.2/32\r\n\r\n[Peer]\r\nPrivateKey = not-mine\r\n";
         assert_eq!(
-            listed,
-            vec![
-                RasConnection {
-                    name: "Infra".into(),
-                    ours: true
-                },
-                RasConnection {
-                    name: "Work VPN".into(),
-                    ours: false
-                },
-                RasConnection {
-                    name: "Other".into(),
-                    ours: false
-                },
-            ]
+            with_private_key(text, key),
+            "[Interface]\r\nPrivateKey = KEY=\r\nAddress = 10.0.0.2/32\r\n\r\n[Peer]\r\nPrivateKey = not-mine\r\n"
         );
-        assert!(parse_ras_connections("", family).is_empty());
+        // Adds one at the end of [Interface] when it has none.
+        assert_eq!(
+            with_private_key(
+                "[Interface]\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = p\n",
+                key
+            ),
+            "[Interface]\nAddress = 10.0.0.2/32\nPrivateKey = KEY=\n\n[Peer]\nPublicKey = p\n"
+        );
+        // [Interface] as the last section, without a trailing newline.
+        assert_eq!(
+            with_private_key(
+                "[Peer]\nPublicKey = p\n\n[Interface]\nAddress = 10.0.0.2/32",
+                key
+            ),
+            "[Peer]\nPublicKey = p\n\n[Interface]\nAddress = 10.0.0.2/32\nPrivateKey = KEY="
+        );
+        // No [Interface] at all, and an empty box.
+        assert_eq!(
+            with_private_key("[Peer]\nPublicKey = p\n", key),
+            "[Peer]\nPublicKey = p\n\n[Interface]\nPrivateKey = KEY=\n"
+        );
+        assert_eq!(
+            with_private_key("", key),
+            "[Interface]\nPrivateKey = KEY=\n"
+        );
+        // Case and spacing of the existing line don't matter.
+        assert_eq!(
+            with_private_key("[interface]\nprivatekey=old\n", key),
+            "[interface]\nPrivateKey = KEY=\n"
+        );
+    }
+
+    #[test]
+    fn parses_trigger_listings() {
+        let text = "app\tC:\\Program Files\\Some App\\app.exe\napp\t\ndns\t.corp.example\nodd line\ndns\t  \ndns\t.\n";
+        assert_eq!(
+            parse_triggers(text),
+            Triggers {
+                apps: vec!["C:\\Program Files\\Some App\\app.exe".into()],
+                dns: vec!["corp.example".into()],
+            }
+        );
+        assert_eq!(parse_triggers(""), Triggers::default());
+    }
+
+    #[test]
+    fn validates_program_paths() {
+        let dir = std::env::temp_dir().join(format!("tunnelik-triggers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("Tool.EXE");
+        std::fs::write(&exe, b"").unwrap();
+        let bat = dir.join("tool.bat");
+        std::fs::write(&bat, b"").unwrap();
+
+        assert_eq!(
+            validate_program_path(&format!(" {} ", exe.display())).unwrap(),
+            exe.display().to_string()
+        );
+        assert!(
+            validate_program_path("tool.exe")
+                .unwrap_err()
+                .contains("full path")
+        );
+        assert!(
+            validate_program_path(&bat.display().to_string())
+                .unwrap_err()
+                .contains(".exe")
+        );
+        assert!(
+            validate_program_path(&dir.join("missing.exe").display().to_string())
+                .unwrap_err()
+                .contains("exist")
+        );
+        assert!(
+            validate_program_path("C:\\x\\\"a\".exe")
+                .unwrap_err()
+                .contains("not allowed")
+        );
+        assert!(validate_program_path("").is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validates_dns_suffixes() {
+        assert_eq!(
+            validate_dns_suffix(" Corp.Example. ").unwrap(),
+            "corp.example"
+        );
+        assert_eq!(validate_dns_suffix("example").unwrap(), "example");
+        assert_eq!(
+            validate_dns_suffix("my-corp.example").unwrap(),
+            "my-corp.example"
+        );
+        for bad in [
+            "",
+            ".",
+            ".corp.example",
+            "corp example",
+            "corp..example",
+            "$env:X",
+            "a`b",
+            "a\"b",
+        ] {
+            assert!(validate_dns_suffix(bad).is_err(), "{bad}");
+        }
     }
 }

@@ -70,6 +70,19 @@ a { color: var(--accent); }
 
 .brand h1 { margin: 0; font-size: 20px; font-weight: 600; }
 .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.brand-meta { display: flex; gap: 8px; align-items: baseline; }
+.linkish {
+  font: inherit;
+  padding: 0;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.linkish:hover { text-decoration: underline; }
+
+.pubkey { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.pubkey code { color: var(--text); user-select: all; }
 
 .tunnels { list-style: none; margin: 0; padding: 0; flex: 1; overflow: auto; }
 .tunnels li {
@@ -142,6 +155,33 @@ main {
 .option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0 132px; cursor: pointer; }
 .option input { margin: 0; accent-color: var(--accent); }
 .hint { margin: 2px 0 0 132px; font-size: 12px; color: var(--muted); }
+.hint-lead { margin: 0 0 4px; }
+
+/* Programs and domains that start the tunnel. */
+.triggers { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.triggers:empty { display: none; }
+.triggers li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.trigger-main { font-weight: 600; white-space: nowrap; }
+.trigger-sub { flex: 1; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.trigger-add { display: flex; gap: 8px; margin-top: 8px; }
+.field {
+  flex: 1;
+  max-width: 320px;
+  font: inherit;
+  padding: 6px 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.field:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .fields {
   display: grid;

@@ -18,6 +18,7 @@ windows-collections = "0.3"
 windows-future = "0.3"
 windows = { version = "0.62", features = [
     "ApplicationModel",
+    "ApplicationModel_Background",
     "Foundation",
     "Networking_Vpn",
     "Storage",
