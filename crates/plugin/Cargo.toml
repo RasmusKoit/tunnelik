@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wgconf = { path = "../wgconf" }
 boringtun = { version = "0.7", default-features = false }
-getrandom = "0.3"
+getrandom = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
