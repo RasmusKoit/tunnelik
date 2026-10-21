@@ -15,7 +15,7 @@ From then on it is just another VPN to Windows.
 
 <br>
 
-![The Tunnelik window: tunnels with their switches on the left, the selected tunnel's interface and peer on the right](docs/tunnelik-window.png)
+![The Tunnelik window: tunnels with their switches on the left; the selected tunnel's interface, its "Start on its own" card and its peer on the right](docs/tunnelik-window.png)
 
 </div>
 
@@ -54,7 +54,7 @@ Configs are encrypted with DPAPI for your Windows user. The overview never shows
 <td width="33%" valign="top">
 
 ### 🔁 Stays up
-Rekeys on schedule and reconnects by itself within seconds when you switch networks. Per tunnel: **always on**, so it comes back after standby and at sign-in, and **keep the PC awake** while it is busy.
+Rekeys on schedule and reconnects by itself within seconds when you switch networks. Per tunnel: **always on**, so it comes back after standby and at sign-in; **keep the PC awake** while it is busy; or **start on its own** for a program, a domain or an address range.
 
 </td>
 <td width="33%" valign="top">
@@ -93,6 +93,16 @@ Add-AppxPackage .\Tunnelik-<version>-x64.msix
 ```
 
 Later versions install over it as updates.
+
+> [!NOTE]
+> **Coming from 0.2.x?** Those packages were named `RasmusKoit.Tunnelik`; 0.3 is `dev.koit.Tunnelik`,
+> a different package to Windows, so it installs next to the old one rather than over it. To move
+> your tunnels: copy `%LOCALAPPDATA%\Packages\RasmusKoit.Tunnelik_<id>\LocalState\tunnels` somewhere
+> safe, remove the old package (`Get-AppxPackage RasmusKoit.Tunnelik | Remove-AppxPackage`) and its
+> VPN profiles (`Get-VpnConnection` and `Remove-VpnConnection` for each tunnel), install 0.3 and open it
+> once, copy the `tunnels` folder into `%LOCALAPPDATA%\Packages\dev.koit.Tunnelik_<id>\LocalState`, and
+> run `tunnelik repair`. The configs are encrypted for your Windows user, not for the package, so they
+> carry over as they are.
 
 ## Use
 
@@ -138,9 +148,10 @@ minutes ago is left alone. `tunnelik always-on <name>` shows the task's registra
 Windows can also bring a tunnel up when you need it rather than keep it up: the **Start on its
 own** card lists programs and DNS domains that dial the tunnel. Add Remote Desktop, say, and the
 tunnel connects when you launch it; add `corp.example` and looking up any name under it connects
-the tunnel first. These are Windows' own VPN triggers, and they watch programs and names only:
-Windows has no trigger for an address or a subnet, so Tunnelik refuses those instead of accepting
-something that would never fire.
+the tunnel first. Programs and domains are Windows' own VPN triggers; address ranges are
+watched by Tunnelik itself, see [Subnets](#subnets) below.
+
+![The Start on its own card: one program under Programs; two domains and two address ranges under Destinations, with a box that takes either](docs/start-on-its-own.png)
 
 This one is **off until you turn it on**, because it touches the system: Windows only watches
 for a program or a name on behalf of a profile it was handed through its device-management
@@ -249,6 +260,8 @@ registers with Windows and which redials through the VPN management API.
 | `crates/manage` | Adding, removing and connecting tunnels, shared by the window and the command |
 | `crates/app` | The window (Tauri, plain HTML/JS) |
 | `crates/cli` | The `tunnelik` command |
+| `crates/service` | `tunnelik_svc.exe`, the `TunnelikMdm` service that hands Windows the profile it starts on its own |
+| `crates/watch` | `tunnelik_watch.exe`, the watcher behind subnet triggers |
 | `package` | MSIX manifest and icons |
 | `scripts` | Build, sign and install |
 
