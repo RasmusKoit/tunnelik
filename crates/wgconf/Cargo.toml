@@ -9,4 +9,4 @@ publish = false
 description = "Parser for WireGuard tunnel configs (wg-quick format)"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
