@@ -13,7 +13,7 @@ wgconf = { path = "../wgconf" }
 tunnelik-plugin = { path = "../plugin" }
 
 [target.'cfg(windows)'.dependencies]
-windows-core = "0.62"
+windows-core = "0.100"
 windows-collections = "0.3"
 windows-future = "0.3"
 windows = { version = "0.62", features = [

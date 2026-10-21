@@ -14,5 +14,5 @@ path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
 tunnelik-plugin = { path = "../plugin" }
-windows-core = "0.62"
+windows-core = "0.100"
 windows = { version = "0.62", features = ["ApplicationModel_Core", "Foundation", "Win32_System_WinRT"] }
