@@ -181,7 +181,12 @@ pub fn set_always_on(name: &str, enabled: bool) -> Result<(), String> {
     let dir = local_state()?;
     let mut options = options::load(&dir, name)?;
     options.always_on = enabled;
-    options::save(&dir, name, &options)?;
+    if options.managed || managed_exists(name)? {
+        // Windows keeps a managed profile always on itself; the flag lives in the profile.
+        rebuild_profile(name, options)?;
+    } else {
+        options::save(&dir, name, &options)?;
+    }
     let any = store::list(&dir)
         .iter()
         .any(|n| options::load(&dir, n).is_ok_and(|o| o.always_on));
@@ -357,8 +362,8 @@ pub fn repair() -> Result<Vec<String>, String> {
             if in_phonebook || !managed_exists(&name)? {
                 retire_hidden_profile(&name)?;
                 remove_profile(&name, &family)?;
-                let (host, _) = tunnel_server(&name)?;
-                apply_managed(&name, &host, &options)?;
+                let (host, _, dns) = tunnel_server(&name)?;
+                apply_managed(&name, &host, &dns, &options)?;
                 repaired.push(name);
             }
         } else if !in_phonebook {
@@ -384,26 +389,71 @@ fn managed_exists(name: &str) -> Result<bool, String> {
     Ok(found.eq_ignore_ascii_case("true"))
 }
 
-/// The first peer's host, shown as the connection's server, and whether the config routes
-/// everything into the tunnel.
-fn tunnel_server(name: &str) -> Result<(String, bool), String> {
+/// The first peer's host, shown as the connection's server, whether the config routes
+/// everything into the tunnel, and the config's DNS servers.
+fn tunnel_server(name: &str) -> Result<(String, bool, Vec<String>), String> {
     let config = wgconf::parse(&read(name)?).map_err(|e| e.to_string())?;
     let s = settings::from_config(&config)?.settings;
     let full_tunnel =
         s.ipv4_routes.iter().any(|r| r.1 == 0) || s.ipv6_routes.iter().any(|r| r.1 == 0);
-    Ok((s.endpoints[0].host.clone(), full_tunnel))
+    let dns = s.dns_servers.iter().map(ToString::to_string).collect();
+    Ok((s.endpoints[0].host.clone(), full_tunnel, dns))
 }
 
 /// Has the service (re)build `name`'s managed profile from its options.
-fn apply_managed(name: &str, host: &str, options: &options::Options) -> Result<(), String> {
+fn apply_managed(
+    name: &str,
+    host: &str,
+    dns_servers: &[String],
+    options: &options::Options,
+) -> Result<(), String> {
     let xml = mdm::profile_xml(
         &package_family()?,
         host,
         &profile::custom_configuration(name),
+        options.always_on,
+        dns_servers,
         &options.app_triggers,
         &options.dns_triggers,
     );
     mdm::apply(name, &xml)
+}
+
+/// Rebuilds `name`'s VPN profile to match its options and saves them: with Windows triggers
+/// it becomes a managed profile the service applies through Windows' MDM bridge, without any
+/// it goes back to an ordinary one. Either way the profile is replaced, so a connected tunnel
+/// is disconnected first and dialed again afterwards.
+fn rebuild_profile(name: &str, mut options: options::Options) -> Result<(), String> {
+    let dir = local_state()?;
+    let was_up = state_of(&connections()?, name) != State::Disconnected;
+    if was_up {
+        disconnect(name)?;
+        // The connection takes a moment to go away; the profile cannot be replaced before.
+        for _ in 0..40 {
+            if state_of(&connections()?, name) == State::Disconnected {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    let before = options::load(&dir, name)?;
+    let (host, full_tunnel, dns) = tunnel_server(name)?;
+    if options.has_triggers() {
+        remove_profile(name, &package_family()?)?;
+        apply_managed(name, &host, &dns, &options)?;
+        options.managed = true;
+    } else {
+        if before.managed || managed_exists(name)? {
+            mdm::remove(name)?;
+        }
+        ensure_user_profile(name, &host, full_tunnel)?;
+        options.managed = false;
+    }
+    options::save(&dir, name, &options)?;
+    if was_up {
+        connect(name)?;
+    }
+    Ok(())
 }
 
 /// Deletes a profile the VPN management API created for `name` in the package's own phonebook,
@@ -517,7 +567,8 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
     let created = if options.has_triggers() {
         // The managed profile only shows the server as a label; refresh it when it can be.
         if state_of(&connections()?, name) == State::Disconnected {
-            apply_managed(name, &s.endpoints[0].host, &options)?;
+            let dns: Vec<String> = s.dns_servers.iter().map(ToString::to_string).collect();
+            apply_managed(name, &s.endpoints[0].host, &dns, &options)?;
         }
         false
     } else {
@@ -770,10 +821,8 @@ pub fn remove_dns_trigger(name: &str, suffix: &str) -> Result<(), String> {
     set_triggers(name, options)
 }
 
-/// Saves a tunnel's new trigger list and rebuilds its VPN profile to match: with triggers it
-/// becomes a managed profile the service applies through Windows' MDM bridge, without any it
-/// goes back to an ordinary one. Either way the profile is replaced, so the tunnel must be
-/// disconnected.
+/// Saves a tunnel's new trigger list and rebuilds its VPN profile to match; see
+/// `rebuild_profile`.
 fn set_triggers(name: &str, options: options::Options) -> Result<(), String> {
     let dir = local_state()?;
     if options.has_triggers() && !triggers_enabled() {
@@ -789,21 +838,7 @@ fn set_triggers(name: &str, options: options::Options) -> Result<(), String> {
             "Only one tunnel can start on its own, and `{holder}` already does; remove its programs and domains first"
         ));
     }
-    if state_of(&connections()?, name) != State::Disconnected {
-        return Err(format!(
-            "disconnect `{name}` first: Windows rebuilds its VPN connection for this"
-        ));
-    }
-    let before = options::load(&dir, name)?;
-    let (host, full_tunnel) = tunnel_server(name)?;
-    if options.has_triggers() {
-        remove_profile(name, &package_family()?)?;
-        apply_managed(name, &host, &options)?;
-    } else if before.has_triggers() || managed_exists(name)? {
-        mdm::remove(name)?;
-        ensure_user_profile(name, &host, full_tunnel)?;
-    }
-    options::save(&dir, name, &options)
+    rebuild_profile(name, options)
 }
 
 /// A program for an app trigger: an absolute path to an existing `.exe`, with nothing in it that

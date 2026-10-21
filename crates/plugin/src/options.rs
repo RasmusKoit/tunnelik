@@ -30,6 +30,9 @@ pub struct Options {
     pub app_triggers: Vec<String>,
     /// DNS suffixes a lookup under which makes Windows dial the tunnel, without a leading dot.
     pub dns_triggers: Vec<String>,
+    /// Its VPN profile is the managed, machine-wide one Windows dials on its own. Windows keeps
+    /// such a profile always on itself, so the always-on task leaves it alone.
+    pub managed: bool,
 }
 
 impl Options {
@@ -49,6 +52,9 @@ pub fn encode(options: &Options) -> String {
     for dns in &options.dns_triggers {
         text.push_str(&format!("dns-trigger = {dns}\n"));
     }
+    if options.managed {
+        text.push_str("managed = true\n");
+    }
     text
 }
 
@@ -65,6 +71,7 @@ pub fn decode(text: &str) -> Options {
             "always-on" => options.always_on = on,
             "app-trigger" if !value.is_empty() => options.app_triggers.push(value.to_string()),
             "dns-trigger" if !value.is_empty() => options.dns_triggers.push(value.to_string()),
+            "managed" => options.managed = on,
             _ => {}
         }
     }
@@ -116,6 +123,7 @@ mod tests {
                     always_on,
                     app_triggers: vec!["C:\\Program Files\\Some App\\app.exe".into()],
                     dns_triggers: vec!["corp.example".into(), "lab.example".into()],
+                    managed: keep_awake,
                 };
                 assert_eq!(decode(&encode(&options)), options);
                 assert!(options.has_triggers());

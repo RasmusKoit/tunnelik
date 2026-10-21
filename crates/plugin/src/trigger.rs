@@ -5,11 +5,11 @@
 //! sign-in and the user coming back to the PC; each time it runs, it dials the first always-on
 //! tunnel that is down, unless the user disconnected it on purpose. Windows' VPN management API
 //! does the dialing, which it allows a plugin's package to do for its own profiles. A tunnel
-//! that starts on its own lives in a managed, all-user profile the API does not list; that one
-//! is dialed by name with `rasdial`, which reads both phonebooks.
+//! that starts on its own lives in a managed profile the API does not list (and `rasdial`
+//! cannot reach from this task's host); Windows keeps that one always on itself, so the task
+//! leaves it alone.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use windows::ApplicationModel::Background::{
@@ -66,30 +66,43 @@ pub struct Candidate {
     pub stopped: bool,
     /// It was disconnected within `GRACE`.
     pub just_dropped: bool,
+    /// Its profile is managed: Windows keeps it always on itself.
+    pub managed: bool,
 }
 
-/// The tunnel to bring back, if any: the first always-on one that was neither stopped on
-/// purpose nor dropped a moment ago, and only when none of Tunnelik's tunnels is up or on its
-/// way, since Windows runs one at a time.
+impl Candidate {
+    /// Always on and Tunnelik's to redial.
+    fn ours(&self) -> bool {
+        self.always_on && !self.managed
+    }
+}
+
+/// The tunnel to bring back, if any: the first always-on one that Windows does not keep up
+/// itself and that was neither stopped on purpose nor dropped a moment ago, and only when none
+/// of Tunnelik's tunnels is up or on its way, since Windows runs one at a time.
 pub fn choose(candidates: &[Candidate], any_up: bool) -> Option<&str> {
     if any_up {
         return None;
     }
     candidates
         .iter()
-        .find(|c| c.always_on && !c.stopped && !c.just_dropped)
+        .find(|c| c.ours() && !c.stopped && !c.just_dropped)
         .map(|c| c.name.as_str())
 }
 
 pub fn candidates(local_state: &Path) -> Vec<Candidate> {
     store::list(local_state)
         .into_iter()
-        .map(|name| Candidate {
-            always_on: options::load(local_state, &name).is_ok_and(|o| o.always_on),
-            stopped: markers::exists(local_state, &name, Marker::Stopped),
-            just_dropped: markers::age(local_state, &name, Marker::Dropped)
-                .is_some_and(|age| age < GRACE),
-            name,
+        .map(|name| {
+            let options = options::load(local_state, &name).unwrap_or_default();
+            Candidate {
+                always_on: options.always_on,
+                managed: options.managed,
+                stopped: markers::exists(local_state, &name, Marker::Stopped),
+                just_dropped: markers::age(local_state, &name, Marker::Dropped)
+                    .is_some_and(|age| age < GRACE),
+                name,
+            }
         })
         .collect()
 }
@@ -98,7 +111,7 @@ pub fn candidates(local_state: &Path) -> Vec<Candidate> {
 fn bring_back() -> std::result::Result<Option<String>, String> {
     let dir = local_state()?;
     let candidates = candidates(&dir);
-    if !candidates.iter().any(|c| c.always_on) {
+    if !candidates.iter().any(Candidate::ours) {
         return Ok(None);
     }
     let family = Package::Current()
@@ -119,29 +132,26 @@ fn bring_back() -> std::result::Result<Option<String>, String> {
                 .is_ok_and(|f| f.to_string().eq_ignore_ascii_case(&family))
         })
         .collect();
-    let ras_up = ras_connections();
     let any_up = profiles.iter().any(|p| {
         p.ConnectionStatus()
             .is_ok_and(|s| s != VpnManagementConnectionStatus::Disconnected)
-    }) || candidates
-        .iter()
-        .any(|c| ras_up.iter().any(|up| up.eq_ignore_ascii_case(&c.name)));
+    });
     let Some(name) = choose(&candidates, any_up) else {
         return Ok(if any_up {
             None
-        } else if candidates.iter().any(|c| c.always_on && c.just_dropped) {
+        } else if candidates.iter().any(|c| c.ours() && c.just_dropped) {
             Some("leaving a tunnel that was dropped a moment ago".into())
         } else {
             Some("every always-on tunnel was stopped on purpose".into())
         });
     };
-    let Some(profile) = profiles.iter().find(|p| {
-        p.ProfileName()
-            .is_ok_and(|n| n.to_string().eq_ignore_ascii_case(name))
-    }) else {
-        file_log(&format!("always on: dialing `{name}` by name"));
-        return rasdial(name).map(|()| Some(format!("brought `{name}` back")));
-    };
+    let profile = profiles
+        .iter()
+        .find(|p| {
+            p.ProfileName()
+                .is_ok_and(|n| n.to_string().eq_ignore_ascii_case(name))
+        })
+        .ok_or_else(|| format!("`{name}` has no VPN connection to dial"))?;
     file_log(&format!("always on: dialing `{name}`"));
     let status = agent
         .ConnectProfileAsync(profile)
@@ -154,70 +164,9 @@ fn bring_back() -> std::result::Result<Option<String>, String> {
     }
 }
 
-/// Names of the RAS connections that are up right now, from `rasdial` with no arguments. Any
-/// failure reads as nothing up, which at worst dials a tunnel Windows then reports as connected.
-fn ras_connections() -> Vec<String> {
-    let Ok(out) = hidden(Command::new("rasdial.exe")).output() else {
-        return Vec::new();
-    };
-    parse_rasdial_list(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// `rasdial` prints "Connected to", one name per line, then "Command completed successfully."
-/// (or "No connections" when nothing is up).
-fn parse_rasdial_list(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .skip_while(|l| !l.eq_ignore_ascii_case("connected to"))
-        .skip(1)
-        .take_while(|l| !l.is_empty() && !l.starts_with("Command completed"))
-        .map(String::from)
-        .collect()
-}
-
-/// Dials a profile by name, which reaches the all-user phonebook too.
-fn rasdial(name: &str) -> std::result::Result<(), String> {
-    let out = hidden(Command::new("rasdial.exe"))
-        .arg(name)
-        .output()
-        .map_err(|e| format!("starting rasdial: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let reason = text
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or("unknown error");
-        Err(format!("dialing `{name}`: {reason}"))
-    }
-}
-
-fn hidden(mut command: Command) -> Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_the_names_rasdial_lists() {
-        assert_eq!(
-            parse_rasdial_list(
-                "Connected to\r\nInfra\r\nLab\r\nCommand completed successfully.\r\n"
-            ),
-            vec!["Infra".to_string(), "Lab".to_string()]
-        );
-        assert!(
-            parse_rasdial_list("No connections\r\nCommand completed successfully.\r\n").is_empty()
-        );
-        assert!(parse_rasdial_list("").is_empty());
-    }
 
     fn c(name: &str, always_on: bool, stopped: bool, just_dropped: bool) -> Candidate {
         Candidate {
@@ -225,7 +174,21 @@ mod tests {
             always_on,
             stopped,
             just_dropped,
+            managed: false,
         }
+    }
+
+    #[test]
+    fn leaves_managed_tunnels_to_windows() {
+        let managed = Candidate {
+            managed: true,
+            ..c("Infra", true, false, false)
+        };
+        assert_eq!(choose(std::slice::from_ref(&managed), false), None);
+        assert_eq!(
+            choose(&[managed, c("Office", true, false, false)], false),
+            Some("Office")
+        );
     }
 
     #[test]

@@ -150,7 +150,15 @@ prompt, and **Turn off** stops it; a restart stops it too, which only matters wh
 change, since Windows itself does the dialing. The tunnel that starts on its own gets a
 managed, machine-wide profile: Settings still shows it, but marks it as managed, and every
 account on the PC sees it. Windows watches for one such profile, so one tunnel at a time can
-start on its own, and it has to be disconnected while its list changes.
+start on its own. Changing its list rebuilds the connection, reconnecting it afterwards if it
+was up, and for such a tunnel Windows does the always-on job itself.
+
+Three Windows rules to know. After you disconnect such a tunnel yourself, Windows waits for the
+next network change or sign-in before starting it again. The request that triggers it runs
+before the tunnel is up, so the first one may fail; Tunnelik shows a toast when the tunnel is
+up. And names under a trigger domain are resolved through the tunnel's DNS servers (the
+`DNS =` line of the config), which keeps internal names working; a browser with its own secure
+DNS never reaches the Windows resolver and so never triggers anything.
 
 ### Keeping the PC awake
 

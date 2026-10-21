@@ -17,10 +17,16 @@ pub fn profile_xml(
     family: &str,
     server_host: &str,
     custom_configuration: &str,
+    always_on: bool,
+    dns_servers: &[String],
     app_triggers: &[String],
     dns_triggers: &[String],
 ) -> String {
     let mut xml = String::from("<VPNProfile>\n  <RememberCredentials>true</RememberCredentials>\n");
+    if always_on {
+        // Windows' own always on: dialed at sign-in and after network changes, by Windows.
+        xml.push_str("  <AlwaysOn>true</AlwaysOn>\n");
+    }
     xml.push_str("  <PluginProfile>\n");
     xml.push_str(&format!(
         "    <ServerUrlList>{}</ServerUrlList>\n",
@@ -41,11 +47,24 @@ pub fn profile_xml(
             escape(app)
         ));
     }
+    // Each domain twice: the exact name and, with the leading dot, every name under it. Windows
+    // turns these into name-resolution rules that beat the tunnel's catch-all rule, so they
+    // name the tunnel's DNS servers too; without them the watched names would be sent to the
+    // local network's DNS even while the tunnel is up.
+    let servers = dns_servers.join(",");
     for dns in dns_triggers {
-        xml.push_str(&format!(
-            "  <DomainNameInformation>\n    <DomainName>.{}</DomainName>\n    <AutoTrigger>true</AutoTrigger>\n  </DomainNameInformation>\n",
-            escape(dns.trim_start_matches('.'))
-        ));
+        let dns = escape(dns.trim_start_matches('.'));
+        for name in [dns.clone(), format!(".{dns}")] {
+            xml.push_str("  <DomainNameInformation>\n");
+            xml.push_str(&format!("    <DomainName>{name}</DomainName>\n"));
+            if !servers.is_empty() {
+                xml.push_str(&format!(
+                    "    <DnsServers>{}</DnsServers>\n",
+                    escape(&servers)
+                ));
+            }
+            xml.push_str("    <AutoTrigger>true</AutoTrigger>\n  </DomainNameInformation>\n");
+        }
     }
     xml.push_str("</VPNProfile>\n");
     xml
@@ -122,20 +141,50 @@ mod tests {
             "Vendor.App_abc",
             "vpn.example.com",
             "<Tunnelik tunnel=\"Home & Co\"/>",
+            true,
+            &["10.1.254.1".into(), "10.1.254.2".into()],
             &["C:\\Tools\\a.exe".into()],
             &["corp.example".into(), ".lab.example".into()],
         );
         assert!(xml.starts_with("<VPNProfile>"));
+        assert!(xml.contains(
+            "<RememberCredentials>true</RememberCredentials>\n  <AlwaysOn>true</AlwaysOn>\n"
+        ));
         assert!(xml.contains("<ServerUrlList>vpn.example.com</ServerUrlList>"));
         assert!(xml.contains("<PluginPackageFamilyName>Vendor.App_abc</PluginPackageFamilyName>"));
         assert!(xml.contains(
             "<CustomConfiguration>&lt;Tunnelik tunnel=&quot;Home &amp; Co&quot;/&gt;</CustomConfiguration>"
         ));
         assert!(xml.contains("<Id>C:\\Tools\\a.exe</Id>"));
+        // The name itself and everything under it, each resolved through the tunnel.
+        assert!(xml.contains("<DomainName>corp.example</DomainName>"));
         assert!(xml.contains("<DomainName>.corp.example</DomainName>"));
+        assert!(xml.contains("<DomainName>lab.example</DomainName>"));
         assert!(xml.contains("<DomainName>.lab.example</DomainName>"));
-        assert_eq!(xml.matches("<AutoTrigger>true</AutoTrigger>").count(), 2);
+        assert_eq!(xml.matches("<AutoTrigger>true</AutoTrigger>").count(), 4);
+        assert_eq!(
+            xml.matches("<DnsServers>10.1.254.1,10.1.254.2</DnsServers>")
+                .count(),
+            4
+        );
         assert!(!xml.contains("<NativeProfile"));
+    }
+
+    #[test]
+    fn leaves_out_what_is_not_set() {
+        let xml = profile_xml(
+            "Vendor.App_abc",
+            "vpn.example.com",
+            "<x/>",
+            false,
+            &[],
+            &[],
+            &["corp.example".into()],
+        );
+        assert!(!xml.contains("<AlwaysOn>"));
+        assert!(!xml.contains("<DnsServers>"));
+        assert!(!xml.contains("<AppTrigger>"));
+        assert_eq!(xml.matches("<DomainNameInformation>").count(), 2);
     }
 
     #[test]

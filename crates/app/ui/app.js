@@ -239,7 +239,7 @@ function renderTriggers() {
     program.split(/[\\/]/).pop(), program,
     () => invoke("remove_app_trigger", { name: selected, program }))));
   ui.dDns.replaceChildren(...t.dns.map((suffix) => triggerRow(
-    suffix, "any name under this domain",
+    suffix, "this name and any under it",
     () => invoke("remove_dns_trigger", { name: selected, suffix }))));
 }
 
@@ -335,6 +335,8 @@ function setButtons() {
   ui.addDns.disabled = busy || elsewhere || !ui.dnsSuffix.value.trim();
   ui.triggersOn.disabled = busy;
   ui.triggersStop.disabled = busy;
+  // The rows are rendered while a change is still in flight, so they follow `busy` from here.
+  for (const button of document.querySelectorAll(".triggers button")) button.disabled = busy;
   ui.generate.disabled = busy;
 }
 
