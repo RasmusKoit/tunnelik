@@ -4,7 +4,7 @@
 
 # Tunnelik
 
-**WireGuard® tunnels in Windows 11's own VPN settings.**
+**WireGuard tunnels in Windows 11's own VPN settings.**
 
 Add a tunnel once, from the same `.conf` the official apps use.<br>
 From then on it is just another VPN to Windows.
