@@ -8,6 +8,9 @@ use std::str::FromStr;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+pub mod amnezia;
+pub use amnezia::{Amnezia, Range};
+
 pub const KEY_LEN: usize = 32;
 /// Smallest MTU IPv4 requires; below it nothing works, and the error only shows at connect.
 pub const MIN_MTU: u16 = 576;
@@ -150,6 +153,8 @@ pub struct Interface {
     pub dns_servers: Vec<IpAddr>,
     pub dns_search: Vec<String>,
     pub mtu: Option<u16>,
+    /// AmneziaWG settings; all off for a plain WireGuard config.
+    pub amnezia: Amnezia,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +163,8 @@ pub struct Peer {
     pub preshared_key: Option<Key>,
     pub allowed_ips: Vec<IpNet>,
     pub endpoint: Option<Endpoint>,
-    pub persistent_keepalive: Option<u16>,
+    /// Seconds between keepalives; AmneziaWG 3 allows a range to pick from.
+    pub persistent_keepalive: Option<Range<u16>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +223,7 @@ struct InterfaceBuilder {
     dns_servers: Vec<IpAddr>,
     dns_search: Vec<String>,
     mtu: Option<u16>,
+    amnezia: amnezia::Builder,
 }
 
 struct PeerBuilder {
@@ -225,7 +232,7 @@ struct PeerBuilder {
     preshared_key: Option<Key>,
     allowed_ips: Vec<IpNet>,
     endpoint: Option<Endpoint>,
-    persistent_keepalive: Option<u16>,
+    persistent_keepalive: Option<Range<u16>>,
 }
 
 enum Section {
@@ -290,7 +297,11 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
             }
             Section::Interface => {
                 let iface = interface.as_mut().expect("in Interface section");
-                match key.to_ascii_lowercase().as_str() {
+                let lower = key.to_ascii_lowercase();
+                if iface.amnezia.set(&lower, key, value, line)? {
+                    continue;
+                }
+                match lower.as_str() {
                     "privatekey" => {
                         set_once(&mut iface.private_key, parse_key(value, line)?, key, line)?
                     }
@@ -373,9 +384,9 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                     }
                     "persistentkeepalive" => {
                         let interval = if value.eq_ignore_ascii_case("off") {
-                            0
+                            Range::single(0)
                         } else {
-                            parse_num(value, key, line)?
+                            amnezia::parse_range(value, key, line)?
                         };
                         set_once(&mut peer.persistent_keepalive, interval, key, line)?;
                     }
@@ -417,7 +428,7 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                 allowed_ips: p.allowed_ips,
                 endpoint: p.endpoint,
                 // 0 means off.
-                persistent_keepalive: p.persistent_keepalive.filter(|&s| s != 0),
+                persistent_keepalive: p.persistent_keepalive.filter(|r| r.hi != 0),
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -430,6 +441,7 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
             dns_servers: iface.dns_servers,
             dns_search: iface.dns_search,
             mtu: iface.mtu,
+            amnezia: iface.amnezia.build()?,
         },
         peers,
     })
@@ -679,7 +691,8 @@ Endpoint = 203.0.113.10:51821
                 sample().replace("Endpoint", &format!("PersistentKeepalive = {v}\nEndpoint"));
             parse(&text).unwrap().peers[0].persistent_keepalive
         };
-        assert_eq!(with("25"), Some(25));
+        assert_eq!(with("25"), Some(Range::single(25)));
+        assert_eq!(with("15-25"), Some(Range { lo: 15, hi: 25 }));
         assert_eq!(with("0"), None);
         assert_eq!(with("off"), None);
     }
@@ -726,6 +739,120 @@ Endpoint = 203.0.113.10:51821
                 .contains("outside of a section")
         );
         assert!(err("[Wat]").message.contains("unknown section"));
+    }
+
+    /// The sample with more `[Interface]` lines.
+    fn with_interface(extra: &str) -> String {
+        sample().replace("DNS = 10.0.0.1\n", &format!("DNS = 10.0.0.1\n{extra}\n"))
+    }
+
+    #[test]
+    fn amnezia_keys_are_optional() {
+        let config = parse(&sample()).unwrap();
+        assert_eq!(config.interface.amnezia, Amnezia::default());
+        assert!(!config.interface.amnezia.is_active());
+    }
+
+    #[test]
+    fn amnezia_1_0() {
+        let text = with_interface(
+            "Jc = 4\nJmin = 50\nJmax = 1000\nS1 = 15\nS2 = 40\n\
+             H1 = 1234567\nH2 = 2345678\nH3 = 3456789\nH4 = 4567890",
+        );
+        let a = parse(&text).unwrap().interface.amnezia;
+        assert_eq!((a.junk_count, a.junk_min, a.junk_max), (4, 50, 1000));
+        assert_eq!(a.paddings, [15, 40, 0, 0]);
+        assert_eq!(
+            a.headers,
+            [
+                Some(Range::single(1234567)),
+                Some(Range::single(2345678)),
+                Some(Range::single(3456789)),
+                Some(Range::single(4567890)),
+            ]
+        );
+        assert!(a.is_active());
+        assert_eq!(a.generation(), "1.0");
+    }
+
+    #[test]
+    fn amnezia_2_0_signature_packets() {
+        let text =
+            with_interface("jc = 2\nI1 = <b 0xf6ab><r 8><t>\ni3 = <rc 12><rd 6>\nS3 = 25\nS4 = 16");
+        let a = parse(&text).unwrap().interface.amnezia;
+        assert_eq!(
+            a.signature_packets[0].as_deref(),
+            Some("<b 0xf6ab><r 8><t>")
+        );
+        assert_eq!(a.signature_packets[1], None);
+        assert_eq!(a.signature_packets[2].as_deref(), Some("<rc 12><rd 6>"));
+        assert_eq!(a.paddings, [0, 0, 25, 16]);
+        assert_eq!(a.generation(), "2.0");
+    }
+
+    #[test]
+    fn amnezia_3_1_every_key() {
+        let text = with_interface(&format!(
+            "Jc = 3\nJmin = 60\nJmax = 120\nS1 = 16\nS2 = 24\nS3 = 20\nS4 = 12\n\
+             H1 = 100000-200000\nH2 = 300000-400000\nH3 = 500000-600000\nH4 = 700000-800000\n\
+             HeaderProtectionKey = {}\nContentPaddingAddition = 0-64\n\
+             RekeyAfterTime = 100-120\nRekeyTimeout = 5\nRejectAfterTime = 180\n\
+             KeepaliveTimeout = 10-12\nMaxHandshakeAttempts = 3-5\n\
+             RandomTrailers = true\nDisableCookies = 1",
+            key(3).to_base64()
+        ));
+        let a = parse(&text).unwrap().interface.amnezia;
+        assert_eq!((a.junk_count, a.junk_min, a.junk_max), (3, 60, 120));
+        assert_eq!(a.paddings, [16, 24, 20, 12]);
+        assert_eq!(
+            a.headers[0],
+            Some(Range {
+                lo: 100000,
+                hi: 200000
+            })
+        );
+        assert_eq!(
+            a.headers[3],
+            Some(Range {
+                lo: 700000,
+                hi: 800000
+            })
+        );
+        assert_eq!(a.header_protection_key, Some(key(3)));
+        assert_eq!(a.content_padding_addition, Some(Range { lo: 0, hi: 64 }));
+        assert_eq!(a.rekey_after_time, Some(Range { lo: 100, hi: 120 }));
+        assert_eq!(a.rekey_timeout, Some(Range::single(5)));
+        assert_eq!(a.reject_after_time, Some(Range::single(180)));
+        assert_eq!(a.keepalive_timeout, Some(Range { lo: 10, hi: 12 }));
+        assert_eq!(a.max_handshake_attempts, Some(Range { lo: 3, hi: 5 }));
+        assert!(a.random_trailers);
+        assert!(a.disable_cookies);
+        assert_eq!(a.generation(), "3.1");
+        assert!(!format!("{a:?}").contains(&key(3).to_base64()));
+    }
+
+    #[test]
+    fn amnezia_refusals() {
+        let msg = |extra: &str| err(&with_interface(extra)).message;
+        assert!(msg("Jc = 129").contains("`Jc`"));
+        assert!(msg("Jmin = 100\nJmax = 50").contains("`Jmin`"));
+        assert!(msg("Jmax = 2000").contains("1280"));
+        assert!(msg("Jc = x").contains("invalid number"));
+        let short_padding = format!(
+            "HeaderProtectionKey = {}\nS1 = 16\nS2 = 16\nS3 = 16\nS4 = 11",
+            key(3).to_base64()
+        );
+        assert!(msg(&short_padding).contains("at least 12"));
+        assert!(msg("HeaderProtectionKey = nope").contains("invalid key"));
+        assert!(msg("H1 = 20-10").contains("`H1`"));
+        assert!(msg("RandomTrailers = yes").contains("true or false"));
+        assert!(msg("I1 =").contains("no value"));
+        assert!(msg("Jc = 1\nJc = 2").contains("duplicate"));
+        assert!(msg("Jd = 10").contains("unknown [Interface] setting"));
+
+        // The cross-key errors point at the first AmneziaWG line.
+        let e = err(&with_interface("Jmin = 100\nJmax = 50"));
+        assert_eq!(e.line, Some(6));
     }
 
     #[test]
