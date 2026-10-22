@@ -230,7 +230,8 @@ it is held.
 fingerprints hidden, for networks that block WireGuard. Its configs are WireGuard configs with
 extra `[Interface]` settings, and Tunnelik takes them as they are: a config with any of those
 settings is an AmneziaWG tunnel, shown as such in the window and in `tunnelik list`, and the same
-engine speaks both.
+engine speaks both. The label names the newest generation the settings need, so a 1.5 config
+shows as 2.0: the two use the same settings.
 
 | Generation | Settings |
 |---|---|
@@ -244,6 +245,10 @@ Limits: `Jc` is at most 128, and `Jmax` and `ContentPaddingAddition` at most 128
 overlap; a `PersistentKeepalive` range starts above 0. WireSock's own additions (`Jd`,
 protocol imitation) are not settings Tunnelik knows. The junk and signature packets go out ahead
 of each handshake, which delays the first packet into the tunnel by a few milliseconds.
+
+Tested against [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) 1.5, 2.0 and 3.1
+servers: handshakes, rekeys, data in both directions, and settings at the limits (a 1300-byte
+`S1`, junk packets of 1280 bytes on a 1280-byte MTU).
 
 ## How it works
 
@@ -277,8 +282,8 @@ registers with Windows and which redials through the VPN management API.
 
 | Path | What |
 |---|---|
-| `crates/wgconf` | Parser for WireGuard `.conf` files |
-| `crates/plugin` | The VPN plugin: WireGuard sessions, Windows glue, the encrypted tunnel store |
+| `crates/wgconf` | Parser for WireGuard `.conf` files, AmneziaWG settings included |
+| `crates/plugin` | The VPN plugin: WireGuard and AmneziaWG sessions, Windows glue, the encrypted tunnel store |
 | `crates/host` | `tunnelik_host.exe`, the process Windows starts the plugin in |
 | `crates/manage` | Adding, removing and connecting tunnels, shared by the window and the command |
 | `crates/app` | The window (Tauri, plain HTML/JS) |
@@ -328,7 +333,9 @@ needs **Settings → System → For developers → Developer Mode**.
 ## Contributing
 
 Issues and pull requests are welcome. `cargo test` runs the test suite; the
-[Build](#build) section covers producing an installable package.
+[Build](#build) section covers producing an installable package. The AmneziaWG interop test in
+`crates/plugin/tests/lab.rs` is ignored by default: it needs real AmneziaWG servers, and its
+header says how to point it at them.
 
 ## License
 
