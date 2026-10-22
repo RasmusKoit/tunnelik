@@ -456,27 +456,34 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
             let buffer = packet.Buffer()?;
             Stats::add(&stats.packets_out, 1);
             match tunnel.encapsulate(&read_buffer(&buffer)?) {
+                // One datagram, or a burst: junk before a handshake, or packets queued
+                // during one.
                 Ok(Some((peer, datagrams))) => {
-                    let mut datagrams = datagrams.into_iter();
-                    // Reuse the packet's own buffer when the first encrypted datagram fits.
-                    if let Some(first) = datagrams.next() {
-                        if first.len() <= buffer.Capacity()? as usize {
-                            write_buffer(&buffer, &first)?;
+                    for (i, datagram) in datagrams.iter().enumerate() {
+                        // Reuse the packet's own buffer when the first datagram fits.
+                        if i == 0 && datagram.len() <= buffer.Capacity()? as usize {
+                            write_buffer(&buffer, datagram)?;
                             session.address(&packet, peer)?;
                             encapsulated.Append(&packet)?;
-                        } else {
-                            let out = new_packet(channel, VpnDataPathType::Send, &first)?;
-                            session.address(&out, peer)?;
-                            encapsulated.Append(&out)?;
+                            Stats::add(&stats.datagrams_out, 1);
+                            continue;
                         }
-                        Stats::add(&stats.datagrams_out, 1);
-                    }
-                    // The rest of a burst: junk before a handshake, or packets queued during one.
-                    for datagram in datagrams {
-                        let out = new_packet(channel, VpnDataPathType::Send, &datagram)?;
-                        session.address(&out, peer)?;
-                        encapsulated.Append(&out)?;
-                        Stats::add(&stats.datagrams_out, 1);
+                        // One datagram Windows' buffer cannot hold is dropped on its own,
+                        // not with everything else in this call.
+                        match new_packet(channel, VpnDataPathType::Send, datagram) {
+                            Ok(out) => {
+                                session.address(&out, peer)?;
+                                encapsulated.Append(&out)?;
+                                Stats::add(&stats.datagrams_out, 1);
+                            }
+                            Err(e) => {
+                                Stats::add(&stats.dropped, 1);
+                                log_drop(&format!(
+                                    "dropping outgoing {}: {e}",
+                                    tunnel.describe(datagram)
+                                ));
+                            }
+                        }
                     }
                 }
                 Ok(None) => {}

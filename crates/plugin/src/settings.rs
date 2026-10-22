@@ -13,6 +13,11 @@ pub const FRAME_OVERHEAD: u32 = 64;
 /// The most an AmneziaWG random trailer adds to a datagram: the engine keeps the trailer
 /// within this UDP window.
 pub const TRAILER_WINDOW: u32 = 500;
+/// The sizes of the four WireGuard messages before any padding: handshake initiation,
+/// handshake response, cookie reply, and the least a data message takes (a keepalive).
+pub const BASE_SIZES: [u16; 4] = [148, 92, 64, 32];
+/// The largest junk packet the engine sends when `Jc` is set but `Jmin`/`Jmax` are not.
+const DEFAULT_JUNK_MAX: u16 = 1000;
 /// Unique local address for tunnels without IPv6 (fd77:6731:3100::/48, picked at random).
 pub const PLACEHOLDER_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd77, 0x6731, 0x3100, 0, 0, 0, 0, 1);
 
@@ -52,6 +57,22 @@ pub struct Obfuscation {
     pub header_protection: bool,
     /// Whether datagrams carry a random trailer, so their length tells less.
     pub trailers: bool,
+    /// The most `ContentPaddingAddition` adds to a data packet.
+    pub content_padding: u32,
+    /// The largest datagram other than data the engine can produce: a padded handshake
+    /// message, a junk packet or a signature packet, before any trailer.
+    pub largest_control: u32,
+}
+
+impl Obfuscation {
+    /// The largest datagram the tunnel sends or receives for an inner packet of `mtu` bytes,
+    /// which is what Windows sizes its packet buffers for: a datagram that does not fit one is
+    /// lost, and before any handshake that is the junk and the initiation themselves.
+    pub fn max_frame_size(&self, mtu: u32) -> u32 {
+        let data = mtu + FRAME_OVERHEAD + u32::from(self.paddings[3]) + self.content_padding;
+        let trailer = if self.trailers { TRAILER_WINDOW } else { 0 };
+        data.max(self.largest_control) + trailer
+    }
 }
 
 /// The engine's settings for a config's AmneziaWG keys, checked the way the engine checks them.
@@ -108,20 +129,33 @@ pub fn obfuscation(a: &Amnezia, mtu: u16) -> Result<Obfuscation, String> {
     config
         .validate()
         .map_err(|e| format!("AmneziaWG settings: {e}"))?;
+
+    let junk = match (a.junk_count, a.junk_max) {
+        (0, _) => 0,
+        (_, 0) => DEFAULT_JUNK_MAX,
+        (_, max) => max,
+    };
+    let signature = config
+        .signature_packets()
+        .iter()
+        .flatten()
+        .map(|p| p.max_len() as u32)
+        .max()
+        .unwrap_or(0);
+    let padded = |k: usize| u32::from(a.paddings[k]) + u32::from(BASE_SIZES[k]);
+    let largest_control = [padded(0), padded(1), padded(2), u32::from(junk), signature]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
     Ok(Obfuscation {
         ranges,
         config,
         paddings: a.paddings,
         header_protection: a.header_protection_key.is_some(),
         trailers: a.random_trailers,
+        content_padding: a.content_padding_addition.map_or(0, |r| r.hi),
+        largest_control,
     })
-}
-
-/// How much larger than the inner packet an encrypted datagram can get.
-pub fn frame_overhead(a: &Amnezia) -> u32 {
-    let padding = a.content_padding_addition.map_or(0, |r| r.hi);
-    let trailer = if a.random_trailers { TRAILER_WINDOW } else { 0 };
-    FRAME_OVERHEAD + u32::from(a.paddings[3]) + padding + trailer
 }
 
 pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
@@ -151,7 +185,8 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
         max_frame_size: 0,
         endpoints,
     };
-    settings.max_frame_size = settings.mtu + frame_overhead(&interface.amnezia);
+    let obfuscation = obfuscation(&interface.amnezia, interface.mtu.unwrap_or(DEFAULT_MTU))?;
+    settings.max_frame_size = obfuscation.max_frame_size(settings.mtu);
 
     for address in &interface.addresses {
         match address.addr {
@@ -176,7 +211,6 @@ pub fn from_config(config: &Config) -> Result<TunnelSetup<'_>, String> {
         }
     }
 
-    let obfuscation = obfuscation(&interface.amnezia, interface.mtu.unwrap_or(DEFAULT_MTU))?;
     Ok(TunnelSetup {
         interface,
         peers,
@@ -394,6 +428,52 @@ mod tests {
         assert!(setup.obfuscation.header_protection && setup.obfuscation.trailers);
         // S4, the content padding and a trailer all grow a data packet.
         assert_eq!(setup.settings.max_frame_size, 1420 + 64 + 12 + 64 + 500);
+    }
+
+    #[test]
+    fn frames_fit_the_handshake_burst() {
+        // The buffers must hold the largest datagram of all, not only data: a padded
+        // initiation, a junk packet or a signature packet can all be bigger.
+        let mut config = config("10.0.0.0/8", Some("a.example:1"));
+        config.interface.mtu = Some(1280);
+        config.interface.amnezia.paddings = [1300, 0, 0, 0];
+        let setup = from_config(&config).unwrap();
+        assert_eq!(setup.obfuscation.largest_control, 1300 + 148);
+        assert_eq!(setup.settings.max_frame_size, 1300 + 148);
+
+        config.interface.mtu = Some(576);
+        config.interface.amnezia = Amnezia {
+            junk_count: 2,
+            junk_min: 100,
+            junk_max: 1280,
+            ..Default::default()
+        };
+        let setup = from_config(&config).unwrap();
+        assert_eq!(setup.settings.max_frame_size, 1280);
+
+        // Jc without sizes means the engine's default of up to 1000 bytes.
+        config.interface.amnezia = Amnezia {
+            junk_count: 2,
+            ..Default::default()
+        };
+        assert_eq!(from_config(&config).unwrap().settings.max_frame_size, 1000);
+
+        config.interface.amnezia = Amnezia {
+            signature_packets: [Some("<r 1200>".into()), None, None, None, None],
+            random_trailers: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            from_config(&config).unwrap().settings.max_frame_size,
+            1200 + 500
+        );
+
+        // Small settings change nothing about a plain tunnel's frames.
+        config.interface.amnezia = Amnezia {
+            paddings: [15, 40, 0, 0],
+            ..Default::default()
+        };
+        assert_eq!(from_config(&config).unwrap().settings.max_frame_size, 640);
     }
 
     #[test]

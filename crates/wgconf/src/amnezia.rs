@@ -23,6 +23,9 @@ pub const MAX_JUNK_COUNT: u16 = 128;
 pub const MAX_JUNK_SIZE: u16 = 1280;
 /// Header protection uses the paddings as its nonce, so each of S1–S4 must hold this much.
 pub const MIN_PADDING_WITH_HEADER_PROTECTION: u16 = 12;
+/// The most `ContentPaddingAddition` may add to a data packet: the plugin sizes its packet
+/// buffers for it, and a padding past one junk packet's worth hides nothing more.
+pub const MAX_CONTENT_PADDING: u32 = MAX_JUNK_SIZE as u32;
 
 /// A number or an inclusive range `low-high`, the form AmneziaWG 3 uses for settings it picks
 /// at random: `MaxHandshakeAttempts = 3-5`, `PersistentKeepalive = 15-25`, `H1 = 100000-200000`.
@@ -376,6 +379,14 @@ impl Builder {
         if junk_max > MAX_JUNK_SIZE {
             return Err(at(format!(
                 "`Jmax` must be {MAX_JUNK_SIZE} or less; the engine sends no larger junk packets"
+            )));
+        }
+        if self
+            .content_padding_addition
+            .is_some_and(|r| r.hi > MAX_CONTENT_PADDING)
+        {
+            return Err(at(format!(
+                "`ContentPaddingAddition` must be {MAX_CONTENT_PADDING} or less"
             )));
         }
         let paddings = self.paddings.map(|s| s.unwrap_or(0));

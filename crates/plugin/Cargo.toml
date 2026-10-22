@@ -18,6 +18,11 @@ wgconf = { path = "../wgconf" }
 boringtun = { git = "https://github.com/RasmusKoit/wiresock-boringtun", rev = "88645eb5ac898974a9c9c9058dc980f9e69984ce", default-features = false }
 getrandom = "0.4"
 
+[dev-dependencies]
+# The tests advance the engine's clock by hand to reach its handshake retries.
+boringtun = { git = "https://github.com/RasmusKoit/wiresock-boringtun", rev = "88645eb5ac898974a9c9c9058dc980f9e69984ce", default-features = false, features = ["mock-instant"] }
+mock_instant = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
 windows-collections = "0.3"

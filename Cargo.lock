@@ -193,6 +193,7 @@ dependencies = [
  "ip_network",
  "ip_network_table",
  "libc",
+ "mock_instant",
  "nix",
  "parking_lot",
  "portable-atomic",
@@ -2001,6 +2002,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "mock_instant"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bb517913cfcfb9eeda59f36020269075a152701a01606c612f547e4890be399"
 
 [[package]]
 name = "muda"
@@ -3967,6 +3974,7 @@ version = "0.1.0"
 dependencies = [
  "boringtun",
  "getrandom 0.4.3",
+ "mock_instant",
  "wgconf",
  "windows",
  "windows-collections",

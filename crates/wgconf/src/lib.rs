@@ -388,6 +388,14 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                         } else {
                             amnezia::parse_range(value, key, line)?
                         };
+                        // Drawn at random from the range, 0 would switch keepalives off on
+                        // some connects and not others.
+                        if interval.lo == 0 && interval.hi != 0 {
+                            return Err(ParseError::at(
+                                line,
+                                format!("`{key}` range must start above 0, or be 0 or off"),
+                            ));
+                        }
                         set_once(&mut peer.persistent_keepalive, interval, key, line)?;
                     }
                     "allowedips" => {
@@ -695,6 +703,12 @@ Endpoint = 203.0.113.10:51821
         assert_eq!(with("15-25"), Some(Range { lo: 15, hi: 25 }));
         assert_eq!(with("0"), None);
         assert_eq!(with("off"), None);
+        let text = sample().replace(
+            "Endpoint",
+            "PersistentKeepalive = 0-25
+Endpoint",
+        );
+        assert!(err(&text).message.contains("start above 0"));
     }
 
     #[test]

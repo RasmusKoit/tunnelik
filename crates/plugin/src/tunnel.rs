@@ -4,13 +4,11 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use boringtun::noise::amnezia::AmneziaConfig;
 use boringtun::noise::errors::WireGuardError;
-use boringtun::noise::handshake::ObfuscationRanges;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 
-use crate::settings::{Obfuscation, TRAILER_WINDOW};
+use crate::settings::{BASE_SIZES, Obfuscation, TRAILER_WINDOW};
 
 /// Scratch space for one datagram. BoringTun needs at least packet length + 32 bytes.
 const BUF_LEN: usize = 65536 + 32;
@@ -18,18 +16,9 @@ const BUF_LEN: usize = 65536 + 32;
 pub struct Tunnel {
     peers: Vec<PeerSession>,
     buf: Vec<u8>,
-    wire: Wire,
-}
-
-/// What this tunnel's datagrams look like on the wire, for telling them apart without the
-/// engine: plain WireGuard, or AmneziaWG with its paddings and message types.
-struct Wire {
-    ranges: ObfuscationRanges,
-    paddings: [u16; 4],
-    /// Whether the message type is encrypted; `config` then knows how to read it.
-    header_protection: bool,
-    trailers: bool,
-    config: AmneziaConfig,
+    /// What this tunnel's datagrams look like on the wire, for telling them apart without
+    /// the engine: plain WireGuard, or AmneziaWG with its paddings and message types.
+    wire: Obfuscation,
 }
 
 /// What a datagram is, as far as its framing shows.
@@ -53,9 +42,6 @@ impl Kind {
         }
     }
 }
-
-/// The sizes of the four WireGuard messages before any padding; data is at least this long.
-const BASE_SIZES: [usize; 4] = [148, 92, 64, 32];
 
 /// A keepalive interval from its range, drawn once per connect like AmneziaWG does.
 fn pick(range: wgconf::Range<u16>) -> u16 {
@@ -175,13 +161,7 @@ impl Tunnel {
         Ok(Tunnel {
             peers,
             buf: vec![0; BUF_LEN],
-            wire: Wire {
-                ranges: obfuscation.ranges,
-                paddings: obfuscation.paddings,
-                header_protection: obfuscation.header_protection,
-                trailers: obfuscation.trailers,
-                config: obfuscation.config.clone(),
-            },
+            wire: obfuscation.clone(),
         })
     }
 
@@ -211,7 +191,7 @@ impl Tunnel {
         ];
         for (k, kind) in kinds.into_iter().enumerate() {
             let prefix = w.paddings[k] as usize;
-            let base = prefix + BASE_SIZES[k];
+            let base = prefix + BASE_SIZES[k] as usize;
             let fits = match kind {
                 Kind::Data => datagram.len() >= base,
                 _ => (base..=base + slack).contains(&datagram.len()),
@@ -836,6 +816,56 @@ mod tests {
         let back = ipv4_packet(b"and back");
         let (_, datagram) = one(&mut server, &back);
         assert_eq!(client.decapsulate(0, &datagram).to_tunnel, vec![back]);
+    }
+
+    #[test]
+    fn retry_burst_comes_from_the_timers() {
+        use mock_instant::thread_local::MockClock;
+
+        let obf = awg(false, 3);
+        let mut client = tunnel_with([1; 32], &[peer([2; 32])], 1, &obf);
+        let first = client.handshake(0);
+        assert_eq!(first.len(), 4);
+        assert!(
+            client.tick().is_empty(),
+            "nothing to do while the handshake is young"
+        );
+
+        // Unanswered for longer than the engine's rekey timeout: the timers retry, and the
+        // retry is a whole burst again, junk first.
+        MockClock::advance(Duration::from_secs(6));
+        let retry = client.tick();
+        assert_eq!(retry.len(), 4, "three junk datagrams, then the initiation");
+        assert!(retry.iter().all(|(peer, _)| *peer == 0));
+        for (_, junk) in &retry[..3] {
+            assert_eq!(client.kind(junk), Kind::Other);
+        }
+        assert_eq!(client.kind(&retry[3].1), Kind::HandshakeInitiation);
+        assert_ne!(retry[3].1, first[3], "a fresh initiation");
+    }
+
+    #[test]
+    fn describes_padded_data() {
+        let a = Amnezia {
+            paddings: [0, 0, 0, 16],
+            ..Default::default()
+        };
+        let obf = crate::settings::obfuscation(&a, 1420).unwrap();
+        let mut client = tunnel_with([1; 32], &[peer([2; 32])], 1, &obf);
+        let mut server = tunnel_with([2; 32], &[peer([1; 32])], 2, &obf);
+        connect(&mut client, 0, &mut server);
+
+        // The session index sits after the S4 padding and the type.
+        let (_, datagram) = one(&mut server, &ipv4_packet(b"x"));
+        assert_eq!(client.kind(&datagram), Kind::Data);
+        let index = u32::from_le_bytes(datagram[20..24].try_into().unwrap());
+        assert_eq!(
+            client.describe(&datagram),
+            format!(
+                "data for our session index {index:#x}, {} bytes",
+                datagram.len()
+            )
+        );
     }
 
     #[test]

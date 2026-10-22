@@ -10,7 +10,7 @@
 
 #![cfg(windows)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod mdm;
@@ -158,15 +158,8 @@ pub fn list() -> Result<Vec<Tunnel>, String> {
     Ok(store::list(&dir)
         .into_iter()
         .map(|name| {
-            let options = options::load(&dir, &name).unwrap_or_default();
-            // A config that no longer parses is still listed, as WireGuard.
-            let protocol = store::load(&dir, &name)
-                .ok()
-                .and_then(|text| wgconf::parse(&text).ok())
-                .map_or_else(
-                    || "WireGuard".to_string(),
-                    |c| protocol_name(&c.interface.amnezia),
-                );
+            let mut options = options::load(&dir, &name).unwrap_or_default();
+            let protocol = protocol_of(&dir, &name, &mut options);
             Tunnel {
                 state: state_of(&connections, &name),
                 keep_awake: options.keep_awake,
@@ -546,6 +539,26 @@ pub fn protocol_name(amnezia: &wgconf::Amnezia) -> String {
     }
 }
 
+/// The protocol noted in a tunnel's options, which `save` keeps current. A tunnel saved before
+/// the note existed gets it now, from its config, so decrypting happens once and not on every
+/// listing; a config that no longer parses counts as WireGuard.
+fn protocol_of(dir: &Path, name: &str, options: &mut options::Options) -> String {
+    if options.protocol.is_empty()
+        && let Ok(text) = store::load(dir, name)
+    {
+        options.protocol = wgconf::parse(&text).map_or_else(
+            |_| "WireGuard".to_string(),
+            |c| protocol_name(&c.interface.amnezia),
+        );
+        let _ = options::save(dir, name, options);
+    }
+    if options.protocol.is_empty() {
+        "WireGuard".to_string()
+    } else {
+        options.protocol.clone()
+    }
+}
+
 pub fn details(name: &str) -> Result<Details, String> {
     let config = wgconf::parse(&read(name)?).map_err(|e| e.to_string())?;
     let iface = &config.interface;
@@ -587,7 +600,7 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
     let full_tunnel =
         s.ipv4_routes.iter().any(|r| r.1 == 0) || s.ipv6_routes.iter().any(|r| r.1 == 0);
     let dir = local_state()?;
-    let options = options::load(&dir, name)?;
+    let mut options = options::load(&dir, name)?;
 
     // The VPN profile comes first: if the name already belongs to another VPN, nothing gets
     // saved.
@@ -610,7 +623,8 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
         }
         return Err(e);
     }
-    Ok(())
+    options.protocol = protocol_name(&config.interface.amnezia);
+    options::save(&dir, name, &options)
 }
 
 /// Creates or updates the ordinary, per-user profile for `name`, and says which it did. Values

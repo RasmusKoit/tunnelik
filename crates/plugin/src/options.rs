@@ -36,6 +36,9 @@ pub struct Options {
     /// Its VPN profile is the managed, machine-wide one Windows dials on its own. Windows keeps
     /// such a profile always on itself, so the always-on task leaves it alone.
     pub managed: bool,
+    /// "WireGuard" or "AmneziaWG 3.1" and the like, noted when the config is saved so that
+    /// listing tunnels needs no decrypting; empty for a tunnel saved before it was noted.
+    pub protocol: String,
 }
 
 impl Options {
@@ -63,6 +66,9 @@ pub fn encode(options: &Options) -> String {
     if options.managed {
         text.push_str("managed = true\n");
     }
+    if !options.protocol.is_empty() {
+        text.push_str(&format!("protocol = {}\n", options.protocol));
+    }
     text
 }
 
@@ -83,6 +89,7 @@ pub fn decode(text: &str) -> Options {
                 options.subnet_triggers.push(value.to_string())
             }
             "managed" => options.managed = on,
+            "protocol" => options.protocol = value.to_string(),
             _ => {}
         }
     }
@@ -136,6 +143,11 @@ mod tests {
                     dns_triggers: vec!["corp.example".into(), "lab.example".into()],
                     subnet_triggers: vec!["10.0.0.0/8".into(), "fd00::/64".into()],
                     managed: keep_awake,
+                    protocol: if always_on {
+                        "AmneziaWG 3.1".into()
+                    } else {
+                        String::new()
+                    },
                 };
                 assert_eq!(decode(&encode(&options)), options);
                 assert!(options.windows_triggers());

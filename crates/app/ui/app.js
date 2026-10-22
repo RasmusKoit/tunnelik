@@ -200,7 +200,7 @@ function renderInterface() {
     ["Search domains", details.dnsSearch],
     ["MTU", details.mtu],
     // AmneziaWG's settings, when the config has any.
-    ...details.obfuscation.map(([label, value]) => [label, value]),
+    ...details.obfuscation,
   ]);
   ui.toggle.textContent = state === "disconnected" ? "Activate" : "Deactivate";
   ui.toggle.disabled = busy || state === "connecting";

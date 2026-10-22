@@ -239,8 +239,9 @@ engine speaks both.
 | 3.0 | `HeaderProtectionKey`, `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`; a `PersistentKeepalive` range such as `15-25` in `[Peer]` |
 | 3.1 | `RandomTrailers`, `DisableCookies` |
 
-Limits: `Jc` is at most 128 and `Jmax` at most 1280; with `HeaderProtectionKey`, `S1`–`S4` must
-each be at least 12; the message type ranges must not overlap. WireSock's own additions (`Jd`,
+Limits: `Jc` is at most 128, and `Jmax` and `ContentPaddingAddition` at most 1280; with
+`HeaderProtectionKey`, `S1`–`S4` must each be at least 12; the message type ranges must not
+overlap; a `PersistentKeepalive` range starts above 0. WireSock's own additions (`Jd`,
 protocol imitation) are not settings Tunnelik knows. The junk and signature packets go out ahead
 of each handshake, which delays the first packet into the tunnel by a few milliseconds.
 
