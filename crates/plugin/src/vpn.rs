@@ -39,7 +39,7 @@ use windows::Foundation::{IReference, PropertyValue};
 use crate::activity::Activity;
 use crate::markers::{self, Marker};
 use crate::power::KeepAwake;
-use crate::tunnel::Tunnel;
+use crate::tunnel::{Kind, Tunnel};
 use crate::winrt::{Context, E_FAIL, host_names, read_buffer, write_buffer};
 use crate::{live, notify, options, profile, settings, store};
 use wgconf::Endpoint;
@@ -64,8 +64,6 @@ pub const BUSY_BYTES_PER_MINUTE: u64 = 64 * 1024;
 const BUSY_WINDOW: Duration = Duration::from_secs(60);
 /// Ticks between re-reading the tunnel's options while connected.
 const OPTIONS_REREAD_TICKS: u64 = 40;
-/// First byte of a WireGuard handshake initiation message.
-const HANDSHAKE_INITIATION: u8 = 1;
 
 const S_OK: HRESULT = HRESULT(0);
 const S_FALSE: HRESULT = HRESULT(1);
@@ -458,18 +456,28 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
             let buffer = packet.Buffer()?;
             Stats::add(&stats.packets_out, 1);
             match tunnel.encapsulate(&read_buffer(&buffer)?) {
-                // Reuse the packet's own buffer when the encrypted datagram fits.
-                Ok(Some((peer, datagram))) if datagram.len() <= buffer.Capacity()? as usize => {
-                    write_buffer(&buffer, &datagram)?;
-                    session.address(&packet, peer)?;
-                    encapsulated.Append(&packet)?;
-                    Stats::add(&stats.datagrams_out, 1);
-                }
-                Ok(Some((peer, datagram))) => {
-                    let out = new_packet(channel, VpnDataPathType::Send, &datagram)?;
-                    session.address(&out, peer)?;
-                    encapsulated.Append(&out)?;
-                    Stats::add(&stats.datagrams_out, 1);
+                Ok(Some((peer, datagrams))) => {
+                    let mut datagrams = datagrams.into_iter();
+                    // Reuse the packet's own buffer when the first encrypted datagram fits.
+                    if let Some(first) = datagrams.next() {
+                        if first.len() <= buffer.Capacity()? as usize {
+                            write_buffer(&buffer, &first)?;
+                            session.address(&packet, peer)?;
+                            encapsulated.Append(&packet)?;
+                        } else {
+                            let out = new_packet(channel, VpnDataPathType::Send, &first)?;
+                            session.address(&out, peer)?;
+                            encapsulated.Append(&out)?;
+                        }
+                        Stats::add(&stats.datagrams_out, 1);
+                    }
+                    // The rest of a burst: junk before a handshake, or packets queued during one.
+                    for datagram in datagrams {
+                        let out = new_packet(channel, VpnDataPathType::Send, &datagram)?;
+                        session.address(&out, peer)?;
+                        encapsulated.Append(&out)?;
+                        Stats::add(&stats.datagrams_out, 1);
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => log_drop(&format!("dropping outgoing packet: {e:?}")),
@@ -510,7 +518,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
             log_drop(&format!(
                 "dropping incoming datagram from peer {}: {e:?} ({})",
                 peer + 1,
-                describe_datagram(&data)
+                lock(&session.tunnel).describe(&data)
             ));
         }
         // One packet that doesn't fit Windows' buffer (say, the peer uses a larger MTU) is
@@ -561,6 +569,18 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     if options.keep_awake {
         file_log("will keep the PC awake while the tunnel is busy");
     }
+    let amnezia = &config.interface.amnezia;
+    if amnezia.is_active() {
+        let rows: Vec<String> = amnezia
+            .summary()
+            .iter()
+            .map(|(label, value)| format!("{label} {value}"))
+            .collect();
+        log(
+            channel,
+            &format!("AmneziaWG {}: {}", amnezia.generation(), rows.join("; ")),
+        );
+    }
 
     let tunnel_addresses: Vec<IpAddr> = s
         .ipv4_addresses
@@ -593,10 +613,17 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     let routes = routes(s).context("setting up routes")?;
     let dns = dns(s).context("setting up DNS")?;
 
+    let tunnel = Tunnel::new(
+        setup.interface,
+        setup.peers,
+        session_index(),
+        &setup.obfuscation,
+    )
+    .map_err(|e| format!("setting up the tunnel: {e}"))?;
     // Windows may hand us packets as soon as the channel starts, so the session exists first.
     let session = Arc::new(Session {
         name,
-        tunnel: Mutex::new(Tunnel::new(setup.interface, setup.peers, session_index())),
+        tunnel: Mutex::new(tunnel),
         channel: channel.clone(),
         local_addresses: sockets.iter().map(local_address).collect(),
         tunnel_addresses,
@@ -664,13 +691,14 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     // Handshake right away, so each peer is up before the first packet needs it.
     for (peer, server) in servers.iter().enumerate() {
         let handshake = lock(&session.tunnel).handshake(peer);
-        if let Some(datagram) = handshake
-            && let Err(e) = session.send(peer, &datagram)
-        {
-            log(
-                channel,
-                &format!("first handshake not sent to {server}, will retry: {e}"),
-            );
+        for datagram in handshake {
+            if let Err(e) = session.send(peer, &datagram) {
+                log(
+                    channel,
+                    &format!("first handshake not sent to {server}, will retry: {e}"),
+                );
+                break;
+            }
         }
     }
     session.write_live();
@@ -819,9 +847,19 @@ fn run_timers(session: &Session) {
         if ticks.is_multiple_of(8) {
             session.write_live();
         }
-        let outgoing = lock(&session.tunnel).tick();
-        for (peer, datagram) in outgoing {
-            if datagram.first() == Some(&HANDSHAKE_INITIATION) {
+        let outgoing: Vec<(usize, bool, Vec<u8>)> = {
+            let mut tunnel = lock(&session.tunnel);
+            tunnel
+                .tick()
+                .into_iter()
+                .map(|(peer, datagram)| {
+                    let initiation = tunnel.kind(&datagram) == Kind::HandshakeInitiation;
+                    (peer, initiation, datagram)
+                })
+                .collect()
+        };
+        for (peer, initiation, datagram) in outgoing {
+            if initiation {
                 let received = session.received[peer].load(Ordering::Relaxed);
                 unanswered[peer].get_or_insert((Instant::now(), received));
             }
@@ -988,23 +1026,6 @@ fn new_packet(channel: &VpnChannel, kind: VpnDataPathType, data: &[u8]) -> Resul
     };
     write_buffer(&packet.Buffer()?, data)?;
     Ok(packet)
-}
-
-/// What kind of WireGuard message a datagram is, for log lines.
-fn describe_datagram(data: &[u8]) -> String {
-    match data.first() {
-        Some(&HANDSHAKE_INITIATION) => "handshake initiation".into(),
-        Some(2) => "handshake response".into(),
-        Some(3) => "cookie reply".into(),
-        Some(4) if data.len() >= 8 => {
-            let index = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-            format!(
-                "data for our session index {index:#x}, {} bytes",
-                data.len()
-            )
-        }
-        _ => format!("unrecognised, {} bytes", data.len()),
-    }
 }
 
 /// Logs a dropped datagram, collapsing a burst of identical drops into one line plus a count:
