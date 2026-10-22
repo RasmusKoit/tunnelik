@@ -45,6 +45,9 @@ fn main() -> ExitCode {
             }
             for t in tunnels {
                 let mut notes = Vec::new();
+                if t.protocol != "WireGuard" {
+                    notes.push(t.protocol.as_str());
+                }
                 if t.always_on {
                     notes.push("always on");
                 }

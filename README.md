@@ -40,7 +40,8 @@ Connect and disconnect wherever Windows shows VPNs, including the network flyout
 <td width="33%" valign="top">
 
 ### 📄 Standard configs
-Paste or import a `wg-quick` style `.conf`, with one or several peers. Nothing to convert.
+Paste or import a `wg-quick` style `.conf`, with one or several peers, for WireGuard or
+[AmneziaWG](#amneziawg). Nothing to convert.
 
 </td>
 <td width="33%" valign="top">
@@ -223,12 +224,33 @@ it is held.
 
 </details>
 
+### AmneziaWG
+
+[AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go) is WireGuard with the protocol's
+fingerprints hidden, for networks that block WireGuard. Its configs are WireGuard configs with
+extra `[Interface]` settings, and Tunnelik takes them as they are: a config with any of those
+settings is an AmneziaWG tunnel, shown as such in the window and in `tunnelik list`, and the same
+engine speaks both.
+
+| Generation | Settings |
+|---|---|
+| 1.0 | `Jc`, `Jmin`, `Jmax` (junk packets before a handshake); `S1`, `S2` (padding before handshake messages); `H1`–`H4` (message types, a value or a range) |
+| 1.5 / 2.0 | `I1`–`I5` (signature packets before a handshake, in AmneziaWG's tag language); `S3`, `S4` |
+| 3.0 | `HeaderProtectionKey`, `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`; a `PersistentKeepalive` range such as `15-25` in `[Peer]` |
+| 3.1 | `RandomTrailers`, `DisableCookies` |
+
+Limits: `Jc` is at most 128 and `Jmax` at most 1280; with `HeaderProtectionKey`, `S1`–`S4` must
+each be at least 12; the message type ranges must not overlap. WireSock's own additions (`Jd`,
+protocol imitation) are not settings Tunnelik knows. The junk and signature packets go out ahead
+of each handshake, which delays the first packet into the tunnel by a few milliseconds.
+
 ## How it works
 
 Windows lets a packaged app provide a VPN through `IVpnPlugIn`: Windows owns the VPN interface,
 routes and DNS, and hands the plugin packets to encrypt and datagrams to decrypt. Tunnelik's
-plugin does exactly that, with [BoringTun](https://github.com/cloudflare/boringtun) speaking the
-WireGuard protocol and a timer thread for handshakes and keepalives.
+plugin does exactly that, with [wiresock-boringtun](https://github.com/Wiresock-Foundation/wiresock-boringtun)
+(a fork of Cloudflare's BoringTun that also speaks AmneziaWG) doing the protocol work and a timer
+thread for handshakes and keepalives.
 
 ```
  Settings / flyout / window / CLI
@@ -237,7 +259,7 @@ WireGuard protocol and a timer thread for handshakes and keepalives.
    Windows VPN platform  ──  owns the interface, routes and DNS
                │  IVpnPlugIn
                ▼
-   tunnelik_host.exe  ──  Tunnelik plugin  ──  BoringTun (WireGuard protocol)
+   tunnelik_host.exe  ──  Tunnelik plugin  ──  wiresock-boringtun (WireGuard, AmneziaWG)
                │
                ▼
      encrypted tunnel store  (DPAPI, per Windows user)
@@ -326,8 +348,14 @@ Tunnelik builds on the work of others:
 
 - **[WireGuard®](https://www.wireguard.com/)** by Jason A. Donenfeld: the protocol Tunnelik
   speaks, and the `.conf` format it reads.
-- **[BoringTun](https://github.com/cloudflare/boringtun)** by Cloudflare (BSD-3-Clause): the
-  WireGuard protocol implementation used for handshakes and encryption.
+- **[wiresock-boringtun](https://github.com/Wiresock-Foundation/wiresock-boringtun)** by the
+  WireSock Foundation, a fork of **[BoringTun](https://github.com/cloudflare/boringtun)** by
+  Cloudflare (both BSD-3-Clause): the WireGuard and AmneziaWG protocol implementation used for
+  handshakes and encryption. Tunnelik builds
+  [its own branch](https://github.com/RasmusKoit/wiresock-boringtun/tree/signature-packets),
+  which adds AmneziaWG's signature packets.
+- **[AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go)** by Amnezia VPN (MIT): the
+  obfuscated protocol and the settings that describe it.
 - **[windows-rs](https://github.com/microsoft/windows-rs)** by Microsoft (MIT or Apache-2.0):
   Rust bindings for the Windows APIs.
 - **[UwpVpnPluginSample](https://github.com/microsoft/UwpVpnPluginSample)** by Microsoft (MIT):

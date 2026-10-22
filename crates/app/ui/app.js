@@ -192,12 +192,15 @@ function renderInterface() {
   ui.alwaysOn.checked = details.alwaysOn;
   fields(ui.dInterface, [
     ["Status", status],
+    ["Protocol", details.protocol],
     ["Public key", details.publicKey, true],
     ["Listen port", details.listenPort],
     ["Addresses", details.addresses],
     ["DNS servers", details.dnsServers],
     ["Search domains", details.dnsSearch],
     ["MTU", details.mtu],
+    // AmneziaWG's settings, when the config has any.
+    ...details.obfuscation.map(([label, value]) => [label, value]),
   ]);
   ui.toggle.textContent = state === "disconnected" ? "Activate" : "Deactivate";
   ui.toggle.disabled = busy || state === "connecting";

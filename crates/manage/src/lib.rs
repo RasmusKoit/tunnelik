@@ -55,6 +55,8 @@ pub struct Tunnel {
     pub keep_awake: bool,
     /// Whether Tunnelik brings the tunnel back by itself after Windows dropped it.
     pub always_on: bool,
+    /// "WireGuard", or "AmneziaWG" with its generation; see `protocol_name`.
+    pub protocol: String,
 }
 
 /// Checks a config the way the plugin will read it, so mistakes show up before saving, and
@@ -157,10 +159,19 @@ pub fn list() -> Result<Vec<Tunnel>, String> {
         .into_iter()
         .map(|name| {
             let options = options::load(&dir, &name).unwrap_or_default();
+            // A config that no longer parses is still listed, as WireGuard.
+            let protocol = store::load(&dir, &name)
+                .ok()
+                .and_then(|text| wgconf::parse(&text).ok())
+                .map_or_else(
+                    || "WireGuard".to_string(),
+                    |c| protocol_name(&c.interface.amnezia),
+                );
             Tunnel {
                 state: state_of(&connections, &name),
                 keep_awake: options.keep_awake,
                 always_on: options.always_on,
+                protocol,
                 name,
             }
         })
@@ -497,6 +508,10 @@ fn retire_hidden_profile(name: &str) -> Result<(), String> {
 /// A tunnel's settings without its secrets: safe to show while browsing tunnels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Details {
+    /// "WireGuard", or "AmneziaWG" with the generation its settings need.
+    pub protocol: String,
+    /// The AmneziaWG settings as label and value rows; empty for WireGuard.
+    pub obfuscation: Vec<(String, String)>,
     pub public_key: String,
     pub listen_port: Option<u16>,
     pub addresses: Vec<String>,
@@ -518,7 +533,17 @@ pub struct PeerDetails {
     pub has_preshared_key: bool,
     pub allowed_ips: Vec<String>,
     pub endpoint: Option<String>,
-    pub persistent_keepalive: Option<u16>,
+    /// Seconds, or a range like `15–25` that AmneziaWG picks from.
+    pub persistent_keepalive: Option<String>,
+}
+
+/// "WireGuard", or "AmneziaWG 3.1" and the like.
+pub fn protocol_name(amnezia: &wgconf::Amnezia) -> String {
+    if amnezia.is_active() {
+        format!("AmneziaWG {}", amnezia.generation())
+    } else {
+        "WireGuard".to_string()
+    }
 }
 
 pub fn details(name: &str) -> Result<Details, String> {
@@ -527,6 +552,8 @@ pub fn details(name: &str) -> Result<Details, String> {
     let strings = |items: &[wgconf::IpNet]| items.iter().map(ToString::to_string).collect();
     let options = options::load(&local_state()?, name)?;
     Ok(Details {
+        protocol: protocol_name(&iface.amnezia),
+        obfuscation: iface.amnezia.summary(),
         public_key: tunnelik_plugin::tunnel::public_key(&iface.private_key).to_base64(),
         listen_port: iface.listen_port,
         addresses: strings(&iface.addresses),
@@ -544,7 +571,7 @@ pub fn details(name: &str) -> Result<Details, String> {
                 has_preshared_key: p.preshared_key.is_some(),
                 allowed_ips: strings(&p.allowed_ips),
                 endpoint: p.endpoint.as_ref().map(ToString::to_string),
-                persistent_keepalive: p.persistent_keepalive,
+                persistent_keepalive: p.persistent_keepalive.map(|r| r.pretty()),
             })
             .collect(),
     })

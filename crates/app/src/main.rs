@@ -47,6 +47,8 @@ mod commands {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Details {
+        protocol: String,
+        obfuscation: Vec<(String, String)>,
         public_key: String,
         listen_port: Option<u16>,
         addresses: Vec<String>,
@@ -77,7 +79,7 @@ mod commands {
         has_preshared_key: bool,
         allowed_ips: Vec<String>,
         endpoint: Option<String>,
-        persistent_keepalive: Option<u16>,
+        persistent_keepalive: Option<String>,
     }
 
     /// What the overview shows: no private or preshared keys ever leave Rust here.
@@ -86,6 +88,8 @@ mod commands {
         blocking(move || {
             let d = manage::details(&name)?;
             Ok(Details {
+                protocol: d.protocol,
+                obfuscation: d.obfuscation,
                 public_key: d.public_key,
                 listen_port: d.listen_port,
                 addresses: d.addresses,

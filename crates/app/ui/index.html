@@ -10,7 +10,7 @@
   <aside class="sidebar">
     <header class="brand">
       <h1>Tunnelik</h1>
-      <p>A client for WireGuard®</p>
+      <p>A client for WireGuard® and AmneziaWG</p>
       <p class="brand-meta"><span id="version"></span><button id="open-log" class="linkish">Log folder</button></p>
     </header>
     <ul id="tunnels" class="tunnels" aria-label="Tunnels"></ul>
@@ -114,6 +114,8 @@
       <textarea id="config" class="config" spellcheck="false"
         placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.0.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …&#10;AllowedIPs = 10.0.0.0/8&#10;Endpoint = vpn.example.com:51820"></textarea>
       <p id="check" class="check" role="status"></p>
+      <p class="hint hint-lead">A WireGuard config, or an AmneziaWG one: those are told apart by
+        their Jc, S, H and I settings.</p>
       <p id="pubkey" class="pubkey" hidden>Public key: <code id="pubkey-value"></code></p>
       <div class="editor-foot">
         <label class="button">Import .conf<input id="import" type="file" accept=".conf,text/plain" hidden></label>
@@ -128,7 +130,9 @@
 
     <footer class="legal">
       “WireGuard” is a registered trademark of Jason A. Donenfeld. Tunnelik is not affiliated with
-      the WireGuard project. WireGuard protocol by <a href="https://github.com/cloudflare/boringtun">BoringTun</a>.
+      the WireGuard project. WireGuard and AmneziaWG protocols by
+      <a href="https://github.com/Wiresock-Foundation/wiresock-boringtun">wiresock-boringtun</a>, a fork of
+      <a href="https://github.com/cloudflare/boringtun">BoringTun</a>.
     </footer>
   </main>
 
