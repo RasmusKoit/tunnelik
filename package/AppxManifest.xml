@@ -35,7 +35,7 @@
       desktop4:SupportsMultipleInstances="true">
       <uap:VisualElements
         DisplayName="Tunnelik"
-        Description="A client for WireGuardÂ®"
+        Description="A client for WireGuard®"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"
         BackgroundColor="transparent" />

@@ -11,7 +11,7 @@ $root = Split-Path $PSScriptRoot
 $profileName = if ($Debug) { 'debug' } else { 'release' }
 $out = Join-Path $root 'target\appx'
 
-$buildArgs = @('build', '--manifest-path', "$root\Cargo.toml", '-p', 'tunnelik-host', '-p', 'tunnelik-plugin', '-p', 'tunnelik-cli', '-p', 'tunnelik-app', '-p', 'tunnelik-service')
+$buildArgs = @('build', '--manifest-path', "$root\Cargo.toml", '-p', 'tunnelik-host', '-p', 'tunnelik-plugin', '-p', 'tunnelik-cli', '-p', 'tunnelik-app', '-p', 'tunnelik-service', '-p', 'tunnelik-watch')
 if (-not $Debug) { $buildArgs += '--release' }
 # cargo reports progress on stderr, which Windows PowerShell would treat as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'
@@ -28,7 +28,7 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 Get-VpnConnection -ErrorAction SilentlyContinue |
     Where-Object { $_.PlugInApplicationID -like 'dev.koit.Tunnelik_*' -and $_.ConnectionStatus -ne 'Disconnected' } |
     ForEach-Object { rasdial $_.Name /disconnect | Out-Null }
-Get-Process tunnelik_host, tunnelik-app -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process tunnelik_host, tunnelik-app, tunnelik_watch -ErrorAction SilentlyContinue | Stop-Process -Force
 New-Item -ItemType Directory -Force $out | Out-Null
 
 # Re-registering the same version silently keeps the old registration, so every install gets a

@@ -67,6 +67,9 @@ if ($Pfx) {
     $thumbprint = & "$PSScriptRoot\new-cert.ps1" | Select-Object -Last 1
     $signWith = @('/sha1', $thumbprint, '/s', 'My')
 }
+# Releases are timestamped so they keep installing after the certificate expires; local
+# builds skip it (no network needed, and new-cert.ps1 renews its certificate itself).
+if ($Pfx) { $signWith += '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256' }
 & "$sdk\signtool.exe" sign /q /fd SHA256 @signWith $msix
 if ($LASTEXITCODE -ne 0) { throw 'signtool sign failed' }
 
