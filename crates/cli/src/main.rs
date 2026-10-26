@@ -184,6 +184,8 @@ fn read_config(file: &str) -> Result<String, String> {
     match bytes[..] {
         [0xFF, 0xFE, ..] => utf16(u16::from_le_bytes),
         [0xFE, 0xFF, ..] => utf16(u16::from_be_bytes),
+        [0xEF, 0xBB, 0xBF, ..] => String::from_utf8(bytes[3..].to_vec())
+            .map_err(|_| format!("{file} is not UTF-8 text; save it as UTF-8 and try again")),
         _ => String::from_utf8(bytes)
             .map_err(|_| format!("{file} is not UTF-8 text; save it as UTF-8 and try again")),
     }

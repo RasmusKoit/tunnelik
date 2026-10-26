@@ -79,6 +79,9 @@ pub fn generate_key(config_text: &str) -> Result<(String, String), String> {
 /// `config_text` with its `[Interface]` private key set to `key`. Everything else, line endings
 /// included, stays as it was.
 fn with_private_key(config_text: &str, key: &str) -> String {
+    // A byte order mark (`tunnelik add` keeps one from a PowerShell or Notepad file) would hide
+    // the first `[Interface]` from the section check below.
+    let config_text = config_text.strip_prefix('\u{feff}').unwrap_or(config_text);
     let newline = if config_text.contains("\r\n") {
         "\r\n"
     } else {
@@ -364,10 +367,24 @@ pub fn repair() -> Result<Vec<String>, String> {
             // A tunnel that starts on its own lives in a managed profile; an ordinary one in
             // its way, or a missing managed one, gets put right.
             if in_phonebook || !managed_exists(&name)? {
+                // Only the helper service can make that profile, and it is stopped after every
+                // install and restart: leave this one for a repair with it running, and go on.
+                if !triggers_enabled() {
+                    continue;
+                }
                 retire_hidden_profile(&name)?;
                 remove_profile(&name, &family)?;
                 let (host, _, dns) = tunnel_server(&name)?;
                 apply_managed(&name, &host, &dns, &options)?;
+                // A rebuild that could not make the managed profile (M6) left an ordinary one and
+                // `managed = false`; now that the managed one exists, say so.
+                if !options.managed {
+                    let options = options::Options {
+                        managed: true,
+                        ..options
+                    };
+                    options::save(&dir, &name, &options)?;
+                }
                 repaired.push(name);
             }
         } else if !in_phonebook {
@@ -429,6 +446,16 @@ fn apply_managed(
 /// is disconnected first and dialed again afterwards.
 fn rebuild_profile(name: &str, mut options: options::Options) -> Result<(), String> {
     let dir = local_state()?;
+    // Making or removing a managed profile takes the helper service, which is stopped after every
+    // restart: refuse before the tunnel is disconnected, not after.
+    if (options.windows_triggers() || options::load(&dir, name)?.managed || managed_exists(name)?)
+        && !triggers_enabled()
+    {
+        return Err(
+            "the helper service is off (a restart stops it); turn on \"Start on its own\" first"
+                .into(),
+        );
+    }
     let was_up = state_of(&connections()?, name) != State::Disconnected;
     if was_up {
         disconnect(name)?;
@@ -444,11 +471,37 @@ fn rebuild_profile(name: &str, mut options: options::Options) -> Result<(), Stri
     let (host, full_tunnel, dns) = tunnel_server(name)?;
     if options.windows_triggers() {
         remove_profile(name, &package_family()?)?;
-        apply_managed(name, &host, &dns, &options)?;
+        if let Err(e) = apply_managed(name, &host, &dns, &options) {
+            // Don't leave the tunnel without any VPN connection: put an ordinary one back, which
+            // a later repair swaps for the managed one once the service can make it.
+            if !managed_exists(name).unwrap_or(false)
+                && ensure_user_profile(name, &host, full_tunnel).is_ok()
+            {
+                let _ = options::save(
+                    &dir,
+                    name,
+                    &options::Options {
+                        managed: false,
+                        ..before
+                    },
+                );
+            }
+            if was_up {
+                let _ = connect(name);
+            }
+            return Err(e);
+        }
         options.managed = true;
     } else {
-        if before.managed || managed_exists(name)? {
-            mdm::remove(name)?;
+        // The managed profile can't go while the service is stopped, the usual state after a
+        // restart: keep it, and bring back the tunnel this disconnected.
+        if (before.managed || managed_exists(name)?)
+            && let Err(e) = mdm::remove(name)
+        {
+            if was_up {
+                let _ = connect(name);
+            }
+            return Err(e);
         }
         ensure_user_profile(name, &host, full_tunnel)?;
         options.managed = false;
@@ -550,7 +603,14 @@ fn protocol_of(dir: &Path, name: &str, options: &mut options::Options) -> String
             |_| "WireGuard".to_string(),
             |c| protocol_name(&c.interface.amnezia),
         );
-        let _ = options::save(dir, name, options);
+        // Onto a fresh read, not `options`: that may be the defaults from a failed read, or older
+        // than a switch flipped since, and saving it would lose the tunnel's settings.
+        if let Ok(mut fresh) = options::load(dir, name)
+            && fresh.protocol.is_empty()
+        {
+            fresh.protocol = options.protocol.clone();
+            let _ = options::save(dir, name, &fresh);
+        }
     }
     if options.protocol.is_empty() {
         "WireGuard".to_string()
@@ -604,9 +664,11 @@ pub fn save(name: &str, config_text: &str) -> Result<(), String> {
 
     // The VPN profile comes first: if the name already belongs to another VPN, nothing gets
     // saved.
-    let created = if options.windows_triggers() {
+    // A tunnel with triggers that a failed rebuild left with an ordinary profile keeps that one
+    // up to date until a repair swaps it; a managed one next to it would make two.
+    let created = if options.windows_triggers() && (options.managed || managed_exists(name)?) {
         // The managed profile only shows the server as a label; refresh it when it can be.
-        if state_of(&connections()?, name) == State::Disconnected {
+        if state_of(&connections()?, name) == State::Disconnected && triggers_enabled() {
             let dns: Vec<String> = s.dns_servers.iter().map(ToString::to_string).collect();
             apply_managed(name, &s.endpoints[0].host, &dns, &options)?;
         }
@@ -791,7 +853,7 @@ pub fn enable_triggers(enabled: bool) -> Result<(), String> {
         try {
             $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $env:TUNNELIK_SCRIPT)
         } catch {
-            [Console]::Error.WriteLine('administrator approval was declined')
+            [Console]::Error.WriteLine('nothing changed: the administrator prompt was cancelled')
             exit 1
         }
         if ($p.ExitCode -ne 0) {
@@ -809,7 +871,7 @@ pub fn enable_triggers(enabled: bool) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
     Err(if enabled {
-        "the TunnelikMdm service did not come up; see C:\\ProgramData\\Tunnelik\\mdm.log".into()
+        "the TunnelikMdm service did not come up; see C:\\Windows\\System32\\LogFiles\\Tunnelik\\mdm.log".into()
     } else {
         "the TunnelikMdm service is still running".into()
     })
@@ -907,7 +969,8 @@ pub fn ensure_watcher() -> Result<(), String> {
     };
     use windows_core::PWSTR;
 
-    let exe = package_folder()?.join("tunnelik_watch.exe");
+    let folder = package_folder()?;
+    let exe = folder.join("tunnelik_watch.exe");
     // Without package identity (the development build of `tunnelik`), a file under WindowsApps
     // cannot be started directly; Windows' own cmdlet starts it inside the package.
     if windows::ApplicationModel::Package::Current().is_err() {
@@ -943,7 +1006,9 @@ pub fn ensure_watcher() -> Result<(), String> {
             false,
             CREATE_NO_WINDOW | DETACHED_PROCESS,
             None,
-            None,
+            // Not the caller's: the watcher runs all session and would keep that folder in use,
+            // so it could not be deleted, renamed or ejected.
+            &HSTRING::from(folder.as_path()),
             &startup,
             &mut process,
         )
@@ -979,7 +1044,7 @@ fn set_triggers(name: &str, options: options::Options) -> Result<(), String> {
     let dir = local_state()?;
     if options.windows_triggers() && !triggers_enabled() {
         return Err(
-            "turn on \"Start on its own\" first; it needs administrator approval once, because Windows keeps such profiles system-wide"
+            "turn on \"Start on its own\" first (Turn on… in the window, or `tunnelik trigger enable`); it needs administrator approval, again after each restart"
                 .into(),
         );
     }
@@ -1144,6 +1209,23 @@ fn rasdial(args: &[&str]) -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
+    // rasdial exits with the RAS error code. Its own text is in the console's OEM code page and
+    // language, so ask RAS for the message, in UTF-16.
+    if let Some(code) = out.status.code().and_then(|c| u32::try_from(c).ok()) {
+        use windows::Win32::NetworkManagement::Rras::RasGetErrorStringW;
+        let mut message = [0u16; 512];
+        // SAFETY: the call writes at most `message.len()` characters, NUL included.
+        if unsafe { RasGetErrorStringW(code, &mut message) } == 0 {
+            let len = message
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(message.len());
+            return Err(format!(
+                "Remote Access error {code} - {}",
+                String::from_utf16_lossy(&message[..len]).trim()
+            ));
+        }
+    }
     // rasdial prints its error, e.g. "Remote Access error 628 - ...", among other lines.
     let text = String::from_utf8_lossy(&out.stdout);
     let error = text
@@ -1188,8 +1270,12 @@ pub fn local_state() -> Result<PathBuf, String> {
 }
 
 fn powershell(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
+    // Windows PowerShell writes redirected output in the OEM code page, which isn't UTF-8.
+    // Switching it here only touches the hidden console `hidden` gives the child.
+    let script =
+        format!("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false\n{script}");
     let out = hidden(Command::new("powershell.exe"))
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .envs(env.iter().copied())
         .output()
         .map_err(|e| format!("starting PowerShell: {e}"))?;
@@ -1254,6 +1340,11 @@ mod tests {
         );
         assert_eq!(
             with_private_key("", key),
+            "[Interface]\nPrivateKey = KEY=\n"
+        );
+        // A byte order mark in front of [Interface] doesn't hide it.
+        assert_eq!(
+            with_private_key("\u{feff}[Interface]\nPrivateKey = old\n", key),
             "[Interface]\nPrivateKey = KEY=\n"
         );
         // Case and spacing of the existing line don't matter.

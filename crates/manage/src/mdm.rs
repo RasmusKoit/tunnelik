@@ -36,9 +36,10 @@ pub fn profile_xml(
         "    <PluginPackageFamilyName>{}</PluginPackageFamilyName>\n",
         escape(family)
     ));
+    // Raw XML, as the provider has always received it (the service's escaping used to stop
+    // at `&`); the name in it is validated, so there is nothing to escape.
     xml.push_str(&format!(
-        "    <CustomConfiguration>{}</CustomConfiguration>\n",
-        escape(custom_configuration)
+        "    <CustomConfiguration>{custom_configuration}</CustomConfiguration>\n"
     ));
     xml.push_str("  </PluginProfile>\n");
     for app in app_triggers {
@@ -100,14 +101,38 @@ pub fn available() -> bool {
 }
 
 fn call(request: &str) -> Result<String, String> {
-    let mut pipe = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(PIPE)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "Tunnelik's helper service (TunnelikMdm) is not running; it starts with Windows once the package is installed with administrator approval".to_string(),
+    use std::os::windows::fs::OpenOptionsExt;
+    // Whoever serves the pipe may learn who we are, but not act as us.
+    const SECURITY_IDENTIFICATION: u32 = 1 << 16;
+    // The service serves one caller at a time. While it works on someone else's request (an
+    // apply takes seconds) the pipe answers ERROR_PIPE_BUSY: wait for a turn rather than
+    // reporting the service as off.
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(PIPE)
+    };
+    let mut attempt = open();
+    for _ in 0..100 {
+        match &attempt {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                attempt = open();
+            }
+            _ => break,
+        }
+    }
+    let mut pipe = attempt.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "Tunnelik's helper service is off (a restart stops it); turn it on under \"Start on its own\", or with `tunnelik trigger enable`".to_string(),
             _ => format!("reaching Tunnelik's helper service: {e}"),
         })?;
+    // While the service is stopped, anyone can create a pipe under its name.
+    if !served_by_service(&pipe) {
+        return Err("the helper service's pipe belongs to another program".into());
+    }
     pipe.write_all(request.as_bytes())
         .and_then(|()| pipe.flush())
         .map_err(|e| format!("sending to Tunnelik's helper service: {e}"))?;
@@ -117,6 +142,50 @@ fn call(request: &str) -> Result<String, String> {
         .read_line(&mut reply)
         .map_err(|e| format!("hearing back from Tunnelik's helper service: {e}"))?;
     parse_reply(&reply)
+}
+
+/// Whether the process at the other end of `pipe` is the running TunnelikMdm service.
+fn served_by_service(pipe: &std::fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT,
+        SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_STATUS_PROCESS,
+    };
+    use windows_core::{PCWSTR, w};
+
+    let mut server = 0u32;
+    // SAFETY: the handle is the open pipe's, and `server` receives the id.
+    if unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server) }.is_err() {
+        return false;
+    }
+    // SAFETY: each handle is closed before returning; the status buffer is the size passed.
+    unsafe {
+        let Ok(scm) = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) else {
+            return false;
+        };
+        let service = OpenServiceW(scm, w!("TunnelikMdm"), SERVICE_QUERY_STATUS);
+        let mut status = SERVICE_STATUS_PROCESS::default();
+        let mut needed = 0u32;
+        let ok = service.as_ref().is_ok_and(|&service| {
+            QueryServiceStatusEx(
+                service,
+                SC_STATUS_PROCESS_INFO,
+                Some(std::slice::from_raw_parts_mut(
+                    (&raw mut status).cast::<u8>(),
+                    size_of::<SERVICE_STATUS_PROCESS>(),
+                )),
+                &mut needed,
+            )
+            .is_ok()
+        });
+        if let Ok(service) = service {
+            let _ = CloseServiceHandle(service);
+        }
+        let _ = CloseServiceHandle(scm);
+        ok && status.dwProcessId == server
+    }
 }
 
 fn parse_reply(reply: &str) -> Result<String, String> {
@@ -153,7 +222,7 @@ mod tests {
         assert!(xml.contains("<ServerUrlList>vpn.example.com</ServerUrlList>"));
         assert!(xml.contains("<PluginPackageFamilyName>Vendor.App_abc</PluginPackageFamilyName>"));
         assert!(xml.contains(
-            "<CustomConfiguration>&lt;Tunnelik tunnel=&quot;Home &amp; Co&quot;/&gt;</CustomConfiguration>"
+            "<CustomConfiguration><Tunnelik tunnel=\"Home & Co\"/></CustomConfiguration>"
         ));
         assert!(xml.contains("<Id>C:\\Tools\\a.exe</Id>"));
         // The name itself and everything under it, each resolved through the tunnel.
