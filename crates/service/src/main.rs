@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -31,6 +31,7 @@ use windows::Win32::Storage::FileSystem::{
     FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFamilyName;
+use windows::Win32::System::IO::CancelIoEx;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, ImpersonateNamedPipeClient,
     PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -130,7 +131,13 @@ fn serve(stop: &AtomicBool, family: &str) {
         }
         // SAFETY: `pipe` is a valid pipe handle for the whole block, closed at its end.
         unsafe {
-            if ConnectNamedPipe(pipe, None).is_ok() && !stop.load(Ordering::SeqCst) {
+            // A client that opened the pipe between CreateNamedPipeW and here is already
+            // connected, which Windows reports as ERROR_PIPE_CONNECTED rather than success.
+            let connected = match ConnectNamedPipe(pipe, None) {
+                Ok(()) => true,
+                Err(e) => e.code() == ERROR_PIPE_CONNECTED.to_hresult(),
+            };
+            if connected && !stop.load(Ordering::SeqCst) {
                 let reply = match handle(pipe, family) {
                     Ok(reply) => format!("ok {reply}\n"),
                     Err(e) => {
@@ -138,8 +145,11 @@ fn serve(stop: &AtomicBool, family: &str) {
                         format!("error: {e}\n")
                     }
                 };
-                let _ = WriteFile(pipe, Some(reply.as_bytes()), None, None);
-                let _ = FlushFileBuffers(pipe);
+                // The flush returns only once the client has read the reply.
+                with_deadline(pipe, || {
+                    let _ = WriteFile(pipe, Some(reply.as_bytes()), None, None);
+                    let _ = FlushFileBuffers(pipe);
+                });
                 let _ = DisconnectNamedPipe(pipe);
             }
             let _ = CloseHandle(pipe);
@@ -147,9 +157,35 @@ fn serve(stop: &AtomicBool, family: &str) {
     }
 }
 
+/// Runs `work`, which reads from or writes to `pipe`, cancelling its blocking calls on the pipe
+/// once it has taken longer than five seconds, and again until it returns: there is one pipe
+/// instance, and a client that connects and then goes quiet would hold it, and so every other
+/// request and the service's own stop, forever. A cancelled read ends the request, but the
+/// reply's flush then blocks again for a client that never reads. Only pipe I/O is bounded:
+/// the PowerShell run in between may be slow, and its reply must still reach the client.
+fn with_deadline<T>(pipe: HANDLE, work: impl FnOnce() -> T) -> T {
+    use std::sync::mpsc::RecvTimeoutError;
+    // Tunnelik writes its request and reads the reply at once; only a stalled client waits.
+    const LIMIT: Duration = Duration::from_secs(5);
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let raw = pipe.0 as usize;
+    let watchdog = std::thread::spawn(move || {
+        let mut wait = LIMIT;
+        while let Err(RecvTimeoutError::Timeout) = finished.recv_timeout(wait) {
+            // SAFETY: the pipe stays open until this thread has been joined.
+            let _ = unsafe { CancelIoEx(HANDLE(raw as *mut std::ffi::c_void), None) };
+            wait = Duration::from_millis(250);
+        }
+    });
+    let result = work();
+    let _ = done.send(());
+    let _ = watchdog.join();
+    result
+}
+
 /// Reads and carries out one request. The caller must be Tunnelik's own package.
 fn handle(pipe: HANDLE, family: &str) -> Result<String, String> {
-    let request = read_request(pipe)?;
+    let request = with_deadline(pipe, || read_request(pipe))?;
     let caller = caller_package_family(pipe)?;
     if family.is_empty() || !caller.eq_ignore_ascii_case(family) {
         return Err("only Tunnelik may use this service".into());
@@ -161,12 +197,12 @@ fn handle(pipe: HANDLE, family: &str) -> Result<String, String> {
             check_name(name)?;
             check_profile_xml(body, family)?;
             log(&format!("applying the profile for `{name}`"));
-            mdm_powershell(APPLY, name, body)
+            mdm_powershell(APPLY, name, body, family)
         }
         "remove" => {
             check_name(name)?;
             log(&format!("removing the profile for `{name}`"));
-            mdm_powershell(REMOVE, name, "")
+            mdm_powershell(REMOVE, name, "", family)
         }
         other => Err(format!("unknown request `{other}`")),
     }
@@ -175,10 +211,8 @@ fn handle(pipe: HANDLE, family: &str) -> Result<String, String> {
 /// Splits a request into its verb, profile name and body, checking the announced length.
 fn parse_request(request: &str) -> Result<(&str, &str, &str), String> {
     let (header, body) = request.split_once('\n').unwrap_or((request, ""));
-    let mut parts = header.split(' ');
-    let verb = parts.next().unwrap_or("");
-    let name = parts.next().unwrap_or("");
-    let length: usize = parts.next().unwrap_or("0").parse().unwrap_or(usize::MAX);
+    let (verb, name, length) = split_header(header);
+    let length: usize = length.unwrap_or("0").parse().unwrap_or(usize::MAX);
     if verb == "apply" && body.len() != length {
         return Err(format!(
             "the request announced {length} bytes of profile XML but carried {}",
@@ -186,6 +220,16 @@ fn parse_request(request: &str) -> Result<(&str, &str, &str), String> {
         ));
     }
     Ok((verb, name, body))
+}
+
+/// `<verb> <name>` or `apply <name> <bytes>`. Tunnel names may contain spaces, so the name is
+/// everything between the verb and, for `apply`, the byte count at the end.
+fn split_header(header: &str) -> (&str, &str, Option<&str>) {
+    let (verb, rest) = header.split_once(' ').unwrap_or((header, ""));
+    match rest.rsplit_once(' ') {
+        Some((name, length)) if verb == "apply" => (verb, name, Some(length)),
+        _ => (verb, rest, None),
+    }
 }
 
 /// The same rule as the tunnel names Tunnelik accepts, so a name can't carry anything odd into
@@ -204,21 +248,44 @@ fn check_name(name: &str) -> Result<(), String> {
 
 /// The profile must be Tunnelik's plugin profile and nothing else: no native VPN, no proxy.
 fn check_profile_xml(xml: &str, family: &str) -> Result<(), String> {
+    // Only the elements manage::mdm::profile_xml writes; anything else (WebProxyServers,
+    // TrafficFilterList, Route, comments, DOCTYPE, ...) is refused.
+    const ALLOWED: [&str; 15] = [
+        "Tunnelik",
+        "VPNProfile",
+        "RememberCredentials",
+        "AlwaysOn",
+        "PluginProfile",
+        "ServerUrlList",
+        "PluginPackageFamilyName",
+        "CustomConfiguration",
+        "AppTrigger",
+        "App",
+        "Id",
+        "DomainNameInformation",
+        "DomainName",
+        "DnsServers",
+        "AutoTrigger",
+    ];
+    for tag in xml.split('<').skip(1) {
+        let tag = tag.strip_prefix('/').unwrap_or(tag);
+        let end = tag
+            .find(|c: char| c == '>' || c == '/' || c.is_whitespace())
+            .unwrap_or(tag.len());
+        if !ALLOWED.contains(&&tag[..end]) {
+            return Err(format!(
+                "the profile contains <{}>, which is not allowed",
+                &tag[..end]
+            ));
+        }
+    }
+    // Without the `>`: `<PluginPackageFamilyName >` passes the tag check too.
+    if xml.matches("<PluginPackageFamilyName").count() != 1 {
+        return Err("the profile must name exactly one plugin".into());
+    }
     let wanted = format!("<PluginPackageFamilyName>{family}</PluginPackageFamilyName>");
     if !xml.contains(&wanted) {
         return Err("the profile does not name Tunnelik's plugin".into());
-    }
-    for forbidden in [
-        "<NativeProfile",
-        "<Proxy",
-        "<DeviceCompliance",
-        "<EdpModeId",
-    ] {
-        if xml.contains(forbidden) {
-            return Err(format!(
-                "the profile contains {forbidden}, which is not allowed"
-            ));
-        }
     }
     Ok(())
 }
@@ -227,9 +294,14 @@ const APPLY: &str = r#"
 $ErrorActionPreference = 'Stop'
 $ns = 'root\cimv2\mdm\dmmap'
 $cls = 'MDM_VPNv2_01'
-$escaped = $env:TUNNELIK_XML.Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
-Get-CimInstance -Namespace $ns -ClassName $cls | Where-Object { $_.InstanceID -eq $env:TUNNELIK_NAME } | Remove-CimInstance
-New-CimInstance -Namespace $ns -ClassName $cls -Property @{ ParentID = './Vendor/MSFT/VPNv2'; InstanceID = $env:TUNNELIK_NAME; ProfileXML = $escaped } | Out-Null
+# The CSP's node name is the profile name, URL-escaped.
+$id = $env:TUNNELIK_NAME.Replace(' ', '%20')
+# Never replace an all-users VPN connection that isn't Tunnelik's, such as one IT deployed.
+$c = Get-VpnConnection -AllUserConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+if ($c -and $c.PlugInApplicationID -ne $env:TUNNELIK_FAMILY) { throw "an all-users VPN connection named '$($env:TUNNELIK_NAME)' exists and is not Tunnelik's" }
+$escaped = $env:TUNNELIK_XML.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
+Get-CimInstance -Namespace $ns -ClassName $cls | Where-Object { $_.InstanceID -eq $id } | Remove-CimInstance
+New-CimInstance -Namespace $ns -ClassName $cls -Property @{ ParentID = './Vendor/MSFT/VPNv2'; InstanceID = $id; ProfileXML = $escaped } | Out-Null
 'applied'
 "#;
 
@@ -237,19 +309,25 @@ const REMOVE: &str = r#"
 $ErrorActionPreference = 'Stop'
 $ns = 'root\cimv2\mdm\dmmap'
 $cls = 'MDM_VPNv2_01'
-$existing = Get-CimInstance -Namespace $ns -ClassName $cls | Where-Object { $_.InstanceID -eq $env:TUNNELIK_NAME }
-if ($existing) { $existing | Remove-CimInstance; 'removed' } else { 'absent' }
+$id = $env:TUNNELIK_NAME.Replace(' ', '%20')
+$existing = Get-CimInstance -Namespace $ns -ClassName $cls | Where-Object { $_.InstanceID -eq $id }
+if (-not $existing) { 'absent' } else {
+    $c = Get-VpnConnection -AllUserConnection -Name $env:TUNNELIK_NAME -ErrorAction SilentlyContinue
+    if ($c -and $c.PlugInApplicationID -ne $env:TUNNELIK_FAMILY) { throw "an all-users VPN connection named '$($env:TUNNELIK_NAME)' exists and is not Tunnelik's" }
+    $existing | Remove-CimInstance; 'removed'
+}
 "#;
 
 /// Runs one of the scripts above as this service's own account (SYSTEM), which the MDM bridge
 /// requires. Values travel as environment variables, so nothing in them is parsed as PowerShell.
-fn mdm_powershell(script: &str, name: &str, xml: &str) -> Result<String, String> {
+fn mdm_powershell(script: &str, name: &str, xml: &str, family: &str) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("TUNNELIK_NAME", name)
         .env("TUNNELIK_XML", xml)
+        .env("TUNNELIK_FAMILY", family)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("starting PowerShell: {e}"))?;
@@ -291,12 +369,11 @@ fn request_complete(data: &[u8]) -> bool {
         return false;
     };
     let header = String::from_utf8_lossy(&data[..newline]);
-    let mut parts = header.split(' ');
-    let verb = parts.next().unwrap_or("");
+    let (verb, _, length) = split_header(&header);
     if verb != "apply" {
         return true;
     }
-    let length: usize = parts.nth(1).unwrap_or("0").parse().unwrap_or(0);
+    let length: usize = length.unwrap_or("0").parse().unwrap_or(0);
     data.len() >= newline + 1 + length
 }
 
@@ -361,9 +438,11 @@ fn pipe_security() -> Result<SECURITY_ATTRIBUTES, String> {
 }
 
 fn log_path() -> PathBuf {
-    let base = std::env::var_os("ProgramData")
-        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
-    base.join("Tunnelik").join("mdm.log")
+    // Not ProgramData, where any user may create the folder, or files in it, first. Under
+    // LogFiles only SYSTEM and administrators may write; users may read.
+    let base =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    base.join(r"System32\LogFiles\Tunnelik").join("mdm.log")
 }
 
 fn log(message: &str) {
@@ -399,6 +478,14 @@ mod tests {
             ("remove", "Infra", "")
         );
         assert_eq!(parse_request("ping\n").unwrap().0, "ping");
+        assert_eq!(
+            parse_request("apply Home VPN 12\n<VPNProfile>").unwrap(),
+            ("apply", "Home VPN", "<VPNProfile>")
+        );
+        assert_eq!(
+            parse_request("remove Home VPN\n").unwrap(),
+            ("remove", "Home VPN", "")
+        );
     }
 
     #[test]
@@ -406,6 +493,8 @@ mod tests {
         assert!(!request_complete(b"apply Infra 12"));
         assert!(!request_complete(b"apply Infra 12\n<VPNProfile"));
         assert!(request_complete(b"apply Infra 12\n<VPNProfile>"));
+        assert!(!request_complete(b"apply Home VPN 12\n<VPNProfile"));
+        assert!(request_complete(b"apply Home VPN 12\n<VPNProfile>"));
         assert!(request_complete(b"remove Infra\n"));
         assert!(request_complete(b"ping\n"));
     }
@@ -424,5 +513,13 @@ mod tests {
         assert!(check_profile_xml(&good, family).is_ok());
         assert!(check_profile_xml(&good, "Other.App_xyz").is_err());
         assert!(check_profile_xml(&format!("{good}<NativeProfile/>"), family).is_err());
+        assert!(
+            check_profile_xml(
+                &format!("{good}<WebProxyServers>x</WebProxyServers>"),
+                family
+            )
+            .is_err()
+        );
+        assert!(check_profile_xml(&format!("<!DOCTYPE x>{good}"), family).is_err());
     }
 }
