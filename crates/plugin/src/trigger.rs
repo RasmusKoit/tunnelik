@@ -107,6 +107,17 @@ pub fn candidates(local_state: &Path) -> Vec<Candidate> {
         .collect()
 }
 
+/// Whether the plugin wrote its live status in the last ten seconds, i.e. a tunnel is running.
+fn live_recently(dir: &Path) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    std::fs::read_to_string(dir.join(crate::live::FILE))
+        .ok()
+        .and_then(|text| crate::live::decode(&text))
+        .is_some_and(|live| now.saturating_sub(live.updated) <= 10)
+}
+
 /// Dials a tunnel if one needs it; says what it did when there is something worth logging.
 fn bring_back() -> std::result::Result<Option<String>, String> {
     let dir = local_state()?;
@@ -132,10 +143,12 @@ fn bring_back() -> std::result::Result<Option<String>, String> {
                 .is_ok_and(|f| f.to_string().eq_ignore_ascii_case(&family))
         })
         .collect();
+    // The managed profile is not among `profiles`; a running tunnel of either kind rewrites the
+    // plugin's live status every two seconds.
     let any_up = profiles.iter().any(|p| {
         p.ConnectionStatus()
             .is_ok_and(|s| s != VpnManagementConnectionStatus::Disconnected)
-    });
+    }) || live_recently(&dir);
     let Some(name) = choose(&candidates, any_up) else {
         return Ok(if any_up {
             None

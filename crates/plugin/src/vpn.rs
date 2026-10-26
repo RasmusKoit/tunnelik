@@ -94,6 +94,9 @@ struct Session {
     contexts: Vec<AgileContext>,
     /// Datagrams received from each peer, for telling a silent peer from a lost handshake.
     received: Vec<AtomicU64>,
+    /// How long an unanswered handshake may go without word from the peer: two of the
+    /// engine's retries, which AmneziaWG's `RekeyTimeout` can stretch, and at least `DEAD_AFTER`.
+    dead_after: Duration,
     /// Set once Start returned. Sending through the channel before that deadlocks.
     started: AtomicBool,
     stop: AtomicBool,
@@ -555,6 +558,7 @@ impl IVpnPlugIn_Impl for Plugin_Impl {
 
 /// Error messages here end up in Settings, so they are written for the user.
 fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
+    let began = Instant::now();
     // A new connection replaces whatever is left of the previous one.
     stop_session();
 
@@ -608,7 +612,7 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
             .AddAndAssociateTransport(&socket, &context.0)
             .context("associating a UDP socket")?;
         contexts.push(context);
-        host(&endpoint.host)
+        resolve(endpoint)
             .and_then(|peer| socket.ConnectAsync(&peer, &HSTRING::from(endpoint.port.to_string())))
             .and_then(|op| op.join())
             .context(&format!("reaching {}", servers[i]))?;
@@ -637,6 +641,9 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
         _sockets: sockets,
         endpoints: s.endpoints.clone(),
         received: (0..s.endpoints.len()).map(|_| AtomicU64::new(0)).collect(),
+        dead_after: amnezia.rekey_timeout.map_or(DEAD_AFTER, |r| {
+            DEAD_AFTER.max(Duration::from_secs(2 * u64::from(r.hi)))
+        }),
         contexts,
         started: AtomicBool::new(false),
         stop: AtomicBool::new(false),
@@ -670,6 +677,15 @@ fn connect(channel: &VpnChannel) -> std::result::Result<(), String> {
     // A connect nobody asked for is always-on bringing the tunnel back: say so.
     if let Ok(dir) = local_state() {
         markers::take(&dir, &session.name, Marker::Dropped);
+        // However it came up (the flyout, Settings, Windows' own triggers), an earlier deliberate
+        // stop is over; left in place, always-on would skip the tunnel for good once it drops.
+        // A stop made while this connect was under way (`tunnelik down` while it was still
+        // connecting) is about this very connection, and its hang-up follows: keep that one.
+        if markers::age(&dir, &session.name, Marker::Stopped)
+            .is_some_and(|age| age > began.elapsed())
+        {
+            markers::take(&dir, &session.name, Marker::Stopped);
+        }
         let asked = markers::take(&dir, &session.name, Marker::Dialing);
         if options.always_on && !asked {
             match notify::show(&session.name) {
@@ -786,8 +802,13 @@ fn run_timers(session: &Session) {
     let mut activity = Activity::new(BUSY_WINDOW);
     let mut awake: Option<KeepAwake> = None;
     let mut awake_failed = false;
-    while !session.stop.load(Ordering::Relaxed) {
+    loop {
         std::thread::sleep(TICK_INTERVAL);
+        // Checked after the sleep: a session stopped meanwhile must not write its status file
+        // or send on the channel once more.
+        if session.stop.load(Ordering::Relaxed) {
+            return;
+        }
         ticks += 1;
 
         let stats = lock(&session.tunnel).peer_stats();
@@ -898,11 +919,19 @@ fn run_timers(session: &Session) {
             {
                 *attempt = Some((Instant::now(), received));
             }
-            let silent = attempt.is_some_and(|(since, _)| since.elapsed() >= DEAD_AFTER);
+            let silent = attempt.is_some_and(|(since, _)| since.elapsed() >= session.dead_after);
             if !(gone || (silent && handshaken[peer])) {
                 continue;
             }
             if reachable(server, &session.tunnel_addresses).is_err() {
+                continue;
+            }
+            // The probe can take seconds: a disconnect or a newer connect in this process
+            // meanwhile must not be taken down by a session that is already over.
+            if session.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if CONNECTING.load(Ordering::SeqCst) > 0 {
                 continue;
             }
             if let Some(local) = local.filter(|_| gone) {
@@ -910,7 +939,7 @@ fn run_timers(session: &Session) {
             } else {
                 file_log(&format!(
                     "nothing from {server} for {}s",
-                    DEAD_AFTER.as_secs()
+                    session.dead_after.as_secs()
                 ));
             }
             file_log("exiting so that Windows connects again");
@@ -1003,6 +1032,27 @@ fn dns(s: &settings::ChannelSettings) -> Result<VpnDomainNameAssignment> {
 
 fn host(name: &str) -> Result<HostName> {
     HostName::CreateHostName(&HSTRING::from(name))
+}
+
+/// The address a peer's connection goes to. A server name with both IPv4 and IPv6 addresses
+/// gets an IPv4 one, as the official client picks: a UDP connect can't tell an address that
+/// answers from one that doesn't, and plenty of servers publish an AAAA record for a web site
+/// while WireGuard only listens on IPv4.
+fn resolve(endpoint: &Endpoint) -> Result<HostName> {
+    let name = host(&endpoint.host)?;
+    if name.Type()? != HostNameType::DomainName {
+        return Ok(name);
+    }
+    let service = HSTRING::from(endpoint.port.to_string());
+    let remotes: Vec<HostName> = DatagramSocket::GetEndpointPairsAsync(&name, &service)?
+        .join()?
+        .into_iter()
+        .filter_map(|pair| pair.RemoteHostName().ok())
+        .collect();
+    let ipv4 = remotes
+        .iter()
+        .find(|h| h.Type().is_ok_and(|t| t == HostNameType::Ipv4));
+    Ok(ipv4.or(remotes.first()).cloned().unwrap_or(name))
 }
 
 fn host_list(

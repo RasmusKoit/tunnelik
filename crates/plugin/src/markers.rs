@@ -54,8 +54,11 @@ fn path(local_state: &Path, name: &str, marker: Marker) -> Result<PathBuf, Strin
 
 pub fn set(local_state: &Path, name: &str, marker: Marker) -> Result<(), String> {
     let path = path(local_state, name, marker)?;
+    // `age` reads the modified time, and recreating an empty file that is already there leaves
+    // that time as it was: stamp it, or a second stop counts from the first.
     fs::create_dir_all(local_state.join(DIR))
-        .and_then(|()| fs::write(&path, b""))
+        .and_then(|()| fs::File::create(&path))
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
         .map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
@@ -74,6 +77,18 @@ pub fn clear(local_state: &Path, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_a_marker_again_restarts_its_age() {
+        let dir = std::env::temp_dir().join(format!("tunnelik-markers-age-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        set(&dir, "Home", Marker::Stopped).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        set(&dir, "Home", Marker::Stopped).unwrap();
+        let age = age(&dir, "Home", Marker::Stopped).unwrap();
+        assert!(age < std::time::Duration::from_millis(1000), "{age:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn set_take_clear() {

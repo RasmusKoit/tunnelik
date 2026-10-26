@@ -35,7 +35,8 @@ pub fn save(local_state: &Path, name: &str, config_text: &str) -> Result<(), Str
 
     // Write next to the target and swap it in, so a connect reading the tunnel at the same moment
     // sees either the old config or the new one, never half of one.
-    let temp = path.with_extension("dpapi.tmp");
+    // A name of its own, so two savers of one tunnel can't swap in each other's half-written file.
+    let temp = crate::options::temp_path(&path);
     fs::create_dir_all(local_state.join(DIR))
         .and_then(|()| fs::write(&temp, encrypted))
         .and_then(|()| fs::rename(&temp, &path))

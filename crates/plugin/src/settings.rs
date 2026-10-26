@@ -100,7 +100,10 @@ pub fn obfuscation(a: &Amnezia, mtu: u16) -> Result<Obfuscation, String> {
     let [s1, s2, s3, s4] = a.paddings;
     let mut config = AmneziaConfig::new(s1, s2, s3, s4);
     if a.junk_count > 0 {
-        config = config.with_pre_handshake_junk(a.junk_count, a.junk_min, a.junk_max, 0);
+        // The engine keeps Jmin/Jmax only when 0 < Jmin <= Jmax and otherwise sends its own
+        // 50-1000 bytes; amneziawg-go takes Jmin = 0, so lift it to 1 to keep the asked sizes.
+        let junk_min = if a.junk_max > 0 { a.junk_min.max(1) } else { 0 };
+        config = config.with_pre_handshake_junk(a.junk_count, junk_min, a.junk_max, 0);
     }
     if let Some(key) = &a.header_protection_key {
         config = config.with_header_protection(key.0);

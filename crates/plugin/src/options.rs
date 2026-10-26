@@ -111,11 +111,28 @@ pub fn load(local_state: &Path, name: &str) -> Result<Options, String> {
     }
 }
 
+/// Where to write `path`'s new contents before swapping them in: a name no other save of it is
+/// using, from another process or from another thread of this one (the app saves from a pool).
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{}-{n}.tmp", std::process::id()));
+    PathBuf::from(name)
+}
+
 pub fn save(local_state: &Path, name: &str, options: &Options) -> Result<(), String> {
     let path = path(local_state, name)?;
+    // Write next to the target and swap it in: the plugin, the always-on task and the watcher
+    // read this file at any moment, and an empty or half-written one reads as the defaults.
+    let temp = temp_path(&path);
     fs::create_dir_all(local_state.join(DIR))
-        .and_then(|()| fs::write(&path, encode(options)))
-        .map_err(|e| format!("saving {}: {e}", path.display()))
+        .and_then(|()| fs::write(&temp, encode(options)))
+        .and_then(|()| fs::rename(&temp, &path))
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            format!("saving {}: {e}", path.display())
+        })
 }
 
 pub fn remove(local_state: &Path, name: &str) -> Result<(), String> {

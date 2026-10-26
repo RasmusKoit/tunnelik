@@ -222,6 +222,8 @@ struct InterfaceBuilder {
     addresses: Vec<IpNet>,
     dns_servers: Vec<IpAddr>,
     dns_search: Vec<String>,
+    /// The first `DNS` entry that is neither an address nor a domain, and its line.
+    odd_dns: Option<(usize, String)>,
     mtu: Option<u16>,
     amnezia: amnezia::Builder,
 }
@@ -327,11 +329,20 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
                         }
                     }
                     "dns" => {
-                        // Entries that are not IP addresses are search domains.
-                        for item in list(value) {
+                        // Entries that are not IP addresses are search domains. wg-quick
+                        // also takes spaces between entries.
+                        for item in value
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .filter(|s| !s.is_empty())
+                        {
                             match item.parse::<IpAddr>() {
                                 Ok(addr) => iface.dns_servers.push(addr),
-                                Err(_) => iface.dns_search.push(item.to_string()),
+                                Err(_) => {
+                                    if !is_domain(item) && iface.odd_dns.is_none() {
+                                        iface.odd_dns = Some((line, item.to_string()));
+                                    }
+                                    iface.dns_search.push(item.to_string());
+                                }
                             }
                         }
                     }
@@ -424,6 +435,16 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
     if peers.is_empty() {
         return Err(ParseError::general("missing [Peer] section"));
     }
+    // Without a single server, every lookup would go around the tunnel. An odd entry next to a
+    // server stays a search domain, as older versions saved it, so their tunnels still connect.
+    if let Some((line, item)) = &iface.odd_dns
+        && iface.dns_servers.is_empty()
+    {
+        return Err(ParseError::at(
+            *line,
+            format!("invalid DNS server `{item}`"),
+        ));
+    }
 
     let peers = peers
         .into_iter()
@@ -457,6 +478,21 @@ pub fn parse(text: &str) -> Result<Config, ParseError> {
 
 fn list(value: &str) -> impl Iterator<Item = &str> {
     value.split(',').map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// A DNS suffix: dot-separated labels of letters, digits, `-` and `_`, and not all digits,
+/// which would be a mistyped IPv4 address.
+fn is_domain(s: &str) -> bool {
+    let s = s.strip_suffix('.').unwrap_or(s);
+    !s.is_empty()
+        && s.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        })
+        && !s.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, key: &str, line: usize) -> Result<(), ParseError> {
@@ -571,6 +607,30 @@ Endpoint = 203.0.113.10:51821
             ]
         );
         assert_eq!(iface.dns_search, vec!["corp.example".to_string()]);
+    }
+
+    #[test]
+    fn dns_lists_with_spaces_and_typos() {
+        let text = sample().replace("DNS = 10.0.0.1", "DNS = 10.0.0.1 10.0.0.2");
+        let iface = parse(&text).unwrap().interface;
+        assert_eq!(iface.dns_servers.len(), 2);
+        assert!(iface.dns_search.is_empty());
+        for bad in [
+            "DNS = 10.0.0.256",
+            "DNS = 10.0.0.1;10.0.0.2",
+            "DNS = corp, 1.1.1.1:53",
+        ] {
+            assert!(
+                parse(&sample().replace("DNS = 10.0.0.1", bad)).is_err(),
+                "{bad}"
+            );
+        }
+        // What older versions saved next to a working server still parses.
+        let iface = parse(&sample().replace("DNS = 10.0.0.1", "DNS = 10.0.0.1, 10.0.0.2;"))
+            .unwrap()
+            .interface;
+        assert_eq!(iface.dns_servers.len(), 1);
+        assert_eq!(iface.dns_search, vec!["10.0.0.2;".to_string()]);
     }
 
     #[test]

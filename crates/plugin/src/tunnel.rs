@@ -100,16 +100,29 @@ pub fn generate_private_key() -> Result<wgconf::Key, String> {
     Ok(wgconf::Key(bytes))
 }
 
-/// WireGuard's cryptokey routing: a peer may only send from addresses in its AllowedIPs.
+/// The peer whose AllowedIPs cover `addr` most specifically. On a tie, the later peer: the one
+/// `wg` leaves holding a range that two peers list. WireGuard's cryptokey routing uses this
+/// one table both ways, for where a packet goes and for who may send it.
+fn owner(peers: &[PeerSession], addr: IpAddr) -> Option<usize> {
+    peers
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| p.allowed_ips.iter().map(move |net| (i, net)))
+        .filter(|(_, net)| net.contains(addr))
+        .max_by_key(|(_, net)| net.prefix)
+        .map(|(i, _)| i)
+}
+
+/// WireGuard's cryptokey routing: a peer may only send from addresses that route to it.
 /// BoringTun leaves this check to the caller. Without it a peer could inject packets that look
-/// like they came from, say, the local network's DNS server.
-fn accept(allowed_ips: &[wgconf::IpNet], packet: &[u8], src: IpAddr, out: &mut Decapsulated) {
+/// like they came from, say, the local network's DNS server, or from another peer's network.
+fn accept(owned: bool, packet: Vec<u8>, out: &mut Decapsulated) {
     // An empty packet is a keepalive.
     if packet.is_empty() {
         return;
     }
-    if allowed_ips.iter().any(|net| net.contains(src)) {
-        out.to_tunnel.push(packet.to_vec());
+    if owned {
+        out.to_tunnel.push(packet);
     } else {
         out.rejected += 1;
     }
@@ -247,14 +260,7 @@ impl Tunnel {
         if self.peers.len() == 1 {
             return Some(0);
         }
-        let dst = Tunn::dst_address(packet)?;
-        self.peers
-            .iter()
-            .enumerate()
-            .flat_map(|(i, p)| p.allowed_ips.iter().map(move |net| (i, net)))
-            .filter(|(_, net)| net.contains(dst))
-            .max_by_key(|(_, net)| net.prefix)
-            .map(|(i, _)| i)
+        owner(&self.peers, Tunn::dst_address(packet)?)
     }
 
     /// Encrypts an IP packet and returns which peer it goes to and the datagrams to send, in
@@ -287,29 +293,42 @@ impl Tunnel {
             out.error = Some(WireGuardError::WrongIndex);
             return out;
         };
+        // Checked against every peer's AllowedIPs once the session is no longer borrowed.
+        let mut decrypted: Option<(Vec<u8>, IpAddr)> = None;
         let mut input = datagram;
         loop {
+            let flushing = input.is_empty();
             match session.tunn.decapsulate(None, input, &mut self.buf) {
-                // BoringTun wants to be called again with an empty datagram until it is Done,
-                // to flush packets that were queued during the handshake.
-                TunnResult::WriteToNetwork(datagram) => {
-                    out.to_network.push(datagram.to_vec());
-                    input = &[];
-                }
+                TunnResult::WriteToNetwork(datagram) => out.to_network.push(datagram.to_vec()),
                 TunnResult::WriteToTunnelV4(packet, src) => {
-                    accept(&session.allowed_ips, packet, src.into(), &mut out);
-                    break;
+                    decrypted = Some((packet.to_vec(), src.into()))
                 }
                 TunnResult::WriteToTunnelV6(packet, src) => {
-                    accept(&session.allowed_ips, packet, src.into(), &mut out);
-                    break;
+                    decrypted = Some((packet.to_vec(), src.into()))
                 }
-                TunnResult::Done => break,
+                TunnResult::Done if flushing => break,
+                TunnResult::Done => {}
                 TunnResult::Err(e) => {
                     out.error = Some(e);
                     break;
                 }
             }
+            // Then call again with an empty datagram until Done, to flush packets queued while
+            // there was no session. Not only a handshake response makes a session current: so
+            // does the peer's first data or keepalive on a session the peer initiated.
+            input = &[];
+        }
+        if let Some((packet, src)) = decrypted {
+            // A single peer owns everything it lists; no need to scan for a better match.
+            let owned = if self.peers.len() == 1 {
+                self.peers[0]
+                    .allowed_ips
+                    .iter()
+                    .any(|net| net.contains(src))
+            } else {
+                owner(&self.peers, src) == Some(peer)
+            };
+            accept(owned, packet, &mut out);
         }
         out
     }
@@ -892,5 +911,42 @@ mod tests {
             let v = pick(Range { lo: 15, hi: 25 });
             assert!((15..=25).contains(&v));
         }
+    }
+
+    #[test]
+    fn a_peer_cannot_send_from_another_peers_network() {
+        let (a, b, c) = ([1; 32], [2; 32], [3; 32]);
+        let peers = [peer_with(b, "0.0.0.0/0"), peer_with(c, "10.0.0.0/8")];
+        let mut client = tunnel(a, &peers, 1);
+        let mut server_b = tunnel(b, &[peer(a)], 2);
+        let reply = server_b.decapsulate(0, &init(&mut client, 0));
+        client.decapsulate(0, &reply.to_network[0]);
+        let (peer, first) = one(&mut client, &ipv4([10, 0, 0, 2], [8, 8, 8, 8], b"hi"));
+        assert_eq!(peer, 0);
+        assert_eq!(server_b.decapsulate(0, &first).to_tunnel.len(), 1);
+
+        // 10.0.0.0/8 routes to peer 1, so peer 0 may not send from it.
+        let spoofed = ipv4_packet_from([10, 1, 1, 1], b"evil");
+        let (_, datagram) = one(&mut server_b, &spoofed);
+        let out = client.decapsulate(0, &datagram);
+        assert!(out.to_tunnel.is_empty());
+        assert_eq!(out.rejected, 1);
+    }
+
+    #[test]
+    fn packets_queued_as_responder_go_out_when_the_peer_confirms() {
+        let (mut client, mut server) = pair();
+        // The server initiates, and the client has a packet before the server confirms.
+        let response = client.decapsulate(0, &init(&mut server, 0));
+        let packet = ipv4_packet(b"early");
+        client.encapsulate(&packet).unwrap();
+        let keepalive = server.decapsulate(0, &response.to_network[0]);
+        let out = client.decapsulate(0, &keepalive.to_network[0]);
+        let delivered: Vec<_> = out
+            .to_network
+            .iter()
+            .flat_map(|d| server.decapsulate(0, d).to_tunnel)
+            .collect();
+        assert_eq!(delivered, vec![packet]);
     }
 }
