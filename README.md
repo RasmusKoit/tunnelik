@@ -159,7 +159,7 @@ for a program or a name on behalf of a profile it was handed through its device-
 channel, which only the SYSTEM account can reach. Tunnelik ships a small service, `TunnelikMdm`,
 that does that one job for Tunnelik's own package and nothing else; it is installed stopped.
 **Turn on…** in the card (or `tunnelik trigger enable`) starts it, with Windows' administrator
-prompt, and **Turn off** stops it; a restart stops it too, which only matters when the lists
+prompt, and **Stop helper service** stops it; a restart stops it too, which only matters when the lists
 change, since Windows itself does the dialing. The tunnel that starts on its own gets a
 managed, machine-wide profile: Settings still shows it, but marks it as managed, and every
 account on the PC sees it. Windows watches for one such profile, so one tunnel at a time can

@@ -95,7 +95,9 @@ a { color: var(--accent); }
 }
 .tunnels li:hover { background: var(--surface); }
 .tunnels li.selected { background: var(--selected); }
-.tunnels .label { flex: 1; }
+.tunnels .label { flex: 1; min-width: 0; padding: 0; font: inherit; color: inherit; text-align: left;
+  background: none; border: none; cursor: pointer; }
+.tunnels .label:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Quick toggle: red when off, yellow while connecting or disconnecting, green when connected. */
 .switch {
@@ -225,7 +227,8 @@ main {
   border: 1px solid transparent;
   border-radius: var(--radius);
 }
-.name:focus, .name:hover { border-color: var(--border); background: var(--surface); outline: none; }
+.name:focus, .name:hover { border-color: var(--border); background: var(--surface); }
+.name:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .name[readonly] { pointer-events: none; }
 
 .state { color: var(--muted); font-size: 13px; }
@@ -274,4 +277,20 @@ main {
   border-radius: var(--radius);
 }
 
+.notice { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+.notice:empty { display: none; }
 .legal { margin-top: 12px; font-size: 11px; color: var(--muted); }
+
+/* High Contrast: Windows repaints every colour the same, so draw the switch from system colours. */
+@media (forced-colors: active) {
+  .switch, .status .dot { forced-color-adjust: none; border: 1px solid ButtonText; background: ButtonFace; }
+  .switch::after { background: ButtonText; top: 2px; left: 2px; }
+  .switch.connected, .status .dot.connected { background: Highlight; }
+  .switch.connected::after { background: HighlightText; left: 18px; }
+  .switch.connecting::after { left: 10px; }
+  .tunnels li.selected { outline: 2px solid Highlight; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch, .switch::after { transition: none; }
+}

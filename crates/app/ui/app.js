@@ -17,26 +17,38 @@ const ui = {
   editor: $("editor"), name: $("name"), nameNote: $("name-note"), config: $("config"), check: $("check"),
   importFile: $("import"), cancel: $("cancel"), save: $("save"), error: $("error"),
   generate: $("generate"), pubkey: $("pubkey"), pubkeyValue: $("pubkey-value"),
-  version: $("version"), openLog: $("open-log"),
+  version: $("version"), openLog: $("open-log"), notice: $("notice"),
 };
 
 let tunnels = [];
-const pending = new Set(); // tunnels we are connecting or disconnecting right now
+const pending = new Map(); // tunnel name → "connect" or "disconnect", while we do it
 let selected = null;     // name of the tunnel shown or being edited; null while adding a new one
 let details = null;      // overview of the selected tunnel
 let savedConfig = "";    // config as loaded into the editor, to detect edits
+// The PrivateKey line Generate key last put in, and its public key; shown while that line stays.
+let generated = null;
 let busy = false;
 
+/// Messages come from the code the command line shares, where `backticks` mark a value; here
+/// quotes read better, and a message starts with a capital like a sentence.
+function readable(message) {
+  const text = String(message ?? "").replace(/`([^`]*)`/g, "“$1”");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function showError(message) {
-  ui.error.textContent = message || "";
+  ui.error.textContent = message ? readable(message) : "";
   ui.error.hidden = !message;
 }
 
 async function run(work) {
   if (busy) return;
   busy = true;
+  // Disabling the pressed button sends focus to the page; put it back afterwards.
+  const focused = document.activeElement;
   setButtons();
   showError("");
+  ui.notice.textContent = "";
   try {
     await work();
   } catch (e) {
@@ -44,7 +56,15 @@ async function run(work) {
   } finally {
     busy = false;
     setButtons();
+    restoreFocus(focused);
   }
+}
+
+/// Puts focus back where it was, or on the next sensible control when that one went away.
+function restoreFocus(element) {
+  if (document.activeElement !== document.body) return;
+  if (element?.isConnected && !element.disabled && element.offsetParent) element.focus();
+  else (!ui.editor.hidden ? ui.config : ui.details.hidden ? ui.add : ui.toggle).focus({ preventScroll: true });
 }
 
 function show(view) {
@@ -55,6 +75,7 @@ function show(view) {
     // Don't keep the private key in the page longer than needed.
     ui.config.value = "";
     savedConfig = "";
+    generated = null;
   }
 }
 
@@ -72,6 +93,11 @@ function stateOf(t) {
 
 const STATE_LABELS = { connected: "Connected", connecting: "Connecting…", disconnected: "Not connected" };
 
+/// A tunnel's state in words; our own disconnect shows as such rather than as "Connecting…".
+function stateLabel(t) {
+  return pending.get(t?.name) === "disconnect" ? "Disconnecting…" : STATE_LABELS[stateOf(t)];
+}
+
 let renderedList = "";
 
 function renderList() {
@@ -81,21 +107,30 @@ function renderList() {
   if (key === renderedList) return;
   renderedList = key;
   const focused = document.activeElement?.dataset?.tunnel;
+  const kind = document.activeElement?.classList?.contains("label") ? ".label" : ".switch";
 
   ui.list.replaceChildren(...tunnels.map((t) => {
     const state = stateOf(t);
     const li = document.createElement("li");
     li.className = t.name === selected ? "selected" : "";
-    const label = document.createElement("span");
+    // A real button, so the keyboard and screen readers can open the tunnel too.
+    const label = document.createElement("button");
     label.className = "label";
     label.textContent = t.name;
+    label.title = t.name;
+    label.dataset.tunnel = t.name;
+    if (t.name === selected) label.setAttribute("aria-current", "true");
+    label.onclick = (e) => {
+      e.stopPropagation();
+      if (!busy && discardOk()) open(t.name);
+    };
 
     const toggle = document.createElement("button");
     toggle.className = `switch ${state}`;
-    toggle.title = `${STATE_LABELS[state]} — click to ${state === "disconnected" ? "connect" : "disconnect"}`;
+    toggle.title = `${stateLabel(t)} — click to ${state === "disconnected" ? "connect" : "disconnect"}`;
     toggle.setAttribute("role", "switch");
     toggle.setAttribute("aria-checked", state === "connected" ? "true" : "false");
-    toggle.setAttribute("aria-label", `${t.name}: ${STATE_LABELS[state]}`);
+    toggle.setAttribute("aria-label", `${t.name}: ${stateLabel(t)}`);
     toggle.dataset.tunnel = t.name;
     toggle.onclick = (e) => {
       e.stopPropagation();
@@ -103,12 +138,12 @@ function renderList() {
     };
 
     li.append(label, toggle);
-    li.onclick = () => open(t.name);
+    li.onclick = () => label.click();
     return li;
   }));
 
   if (focused) {
-    [...ui.list.querySelectorAll(".switch")].find((s) => s.dataset.tunnel === focused)?.focus();
+    [...ui.list.querySelectorAll(kind)].find((s) => s.dataset.tunnel === focused)?.focus();
   }
 }
 
@@ -129,22 +164,36 @@ function dot(state) {
 async function toggleTunnel(t) {
   if (pending.has(t.name)) return;
   const action = stateOf(t) === "disconnected" ? "connect" : "disconnect";
-  pending.add(t.name);
+  const focused = document.activeElement;
+  const others = action === "connect"
+    ? tunnels.filter((o) => o.name !== t.name && o.state !== "disconnected").map((o) => `"${o.name}"`)
+    : [];
+  pending.set(t.name, action);
   showError("");
+  ui.notice.textContent = "";
   renderAll();
   try {
     await invoke(action, { name: t.name });
+    if (others.length) ui.notice.textContent = `${others.join(", ")} was disconnected: one Tunnelik tunnel runs at a time.`;
   } catch (e) {
     showError(String(e));
   } finally {
     pending.delete(t.name);
     await refresh();
+    restoreFocus(focused);
   }
 }
 
+/// Text being selected in the overview, e.g. a key to copy; a redraw would drop it.
+function selecting() {
+  const s = document.getSelection();
+  return !!s && !s.isCollapsed && ui.details.contains(s.anchorNode);
+}
+
 function renderAll() {
+  $("empty-title").textContent = tunnels.length ? "No tunnel selected" : "No tunnels yet";
   renderList();
-  if (!ui.details.hidden) renderInterface();
+  if (!ui.details.hidden && !selecting()) renderInterface();
 }
 
 async function refresh() {
@@ -183,8 +232,12 @@ function renderInterface() {
   const state = stateOf(current());
   const status = document.createElement("span");
   status.className = "status";
-  let label = { connected: "Active", connecting: "Working…", disconnected: "Inactive" }[state];
+  let label = stateLabel(current());
   if (state === "connected" && live?.keepingAwake) label += ", keeping the PC awake";
+  // Windows says connected once the plugin runs; only a handshake shows the server answered.
+  if (state === "connected" && live?.peers.length && live.peers.every((p) => p.lastHandshakeSecsAgo == null && p.rxBytes === 0)) {
+    label += ", no handshake with the server yet";
+  }
   status.append(dot(state), document.createTextNode(label));
 
   ui.dName.textContent = selected;
@@ -202,7 +255,7 @@ function renderInterface() {
     // AmneziaWG's settings, when the config has any.
     ...details.obfuscation,
   ]);
-  ui.toggle.textContent = state === "disconnected" ? "Activate" : "Deactivate";
+  ui.toggle.textContent = state === "disconnected" ? "Connect" : "Disconnect";
   ui.toggle.disabled = busy || state === "connecting";
 }
 
@@ -235,11 +288,16 @@ function renderTriggers() {
   // work, so the destinations group always shows.
   ui.triggersOff.hidden = t.enabled;
   ui.triggersStop.hidden = !t.enabled;
-  ui.groupPrograms.hidden = !t.enabled;
-  ui.triggersElsewhere.hidden = !t.enabled || !t.elsewhere;
-  ui.triggersElsewhere.textContent = t.elsewhere
-    ? `Right now "${t.elsewhere}" is the tunnel Windows starts on its own. Remove its programs and domains to use this one instead.`
-    : "";
+  // Windows keeps dialing for what it was given while the service is off (after a restart, say),
+  // so those stay listed instead of looking switched off.
+  const held = t.apps.length > 0 || t.dns.length > 0;
+  ui.groupPrograms.hidden = !t.enabled && t.apps.length === 0;
+  ui.triggersElsewhere.hidden = t.enabled ? !t.elsewhere : !held;
+  ui.triggersElsewhere.textContent = !t.enabled && held
+    ? "Windows still starts this tunnel for these. Turn the helper service on to change them."
+    : t.elsewhere
+      ? `Right now "${t.elsewhere}" is the tunnel Windows starts on its own. Remove its programs and domains to use this one instead.`
+      : "";
   ui.dApps.replaceChildren(...t.apps.map((program) => triggerRow(
     program.split(/[\\/]/).pop(), program,
     () => invoke("remove_app_trigger", { name: selected, program }))));
@@ -259,12 +317,13 @@ function isRange(text) {
 let live = null;          // the plugin's status while the selected tunnel is connected
 
 function renderPeers() {
-  ui.dPeers.replaceChildren(...details.peers.map((p) => {
+  ui.dPeers.replaceChildren(...details.peers.map((p, i) => {
     const card = document.createElement("div");
     card.className = "card";
     const title = document.createElement("h2");
     title.className = "card-title";
-    title.textContent = "Peer";
+    // Told apart for heading navigation when there are several.
+    title.textContent = details.peers.length > 1 ? `Peer ${i + 1}${p.endpoint ? `: ${p.endpoint}` : ""}` : "Peer";
     const dl = document.createElement("dl");
     dl.className = "fields";
     const now = live && live.peers.find((l) => l.publicKey === p.publicKey);
@@ -304,9 +363,12 @@ function bytes(n) {
 /// changed. Cheap: it reads a small file the plugin rewrites every 2 seconds.
 async function refreshLive() {
   if (!details || ui.details.hidden) return;
+  const name = selected;
   const next = stateOf(current()) === "connected"
-    ? await invoke("tunnel_live", { name: selected }).catch(() => null)
+    ? await invoke("tunnel_live", { name }).catch(() => null)
     : null;
+  // Another tunnel was opened meanwhile, or a key is being selected to copy.
+  if (name !== selected || ui.details.hidden || selecting()) return;
   if (JSON.stringify(next) !== JSON.stringify(live)) {
     live = next;
     renderInterface();
@@ -330,6 +392,18 @@ function open(name) {
   return run(() => loadDetails(name));
 }
 
+/// Whether the editor holds text that leaving would lose: an edited config, or anything typed
+/// for a new tunnel.
+function unsaved() {
+  if (ui.editor.hidden) return false;
+  return ui.config.value !== savedConfig || (selected === null && ui.name.value.trim() !== "");
+}
+
+/// Asks before throwing away unsaved edits; true when it is fine to leave the editor.
+function discardOk() {
+  return !unsaved() || confirm("Discard your changes? A key generated here is lost with them.");
+}
+
 // ---- Editor ----
 
 function setButtons() {
@@ -344,7 +418,7 @@ function setButtons() {
   ui.keepAwake.disabled = busy;
   ui.alwaysOn.disabled = busy;
   const elsewhere = !!details?.triggers?.elsewhere;
-  ui.addApp.disabled = busy || elsewhere;
+  ui.addApp.disabled = busy || elsewhere || !details?.triggers?.enabled;
   ui.addDestination.disabled = busy || !ui.destination.value.trim();
   ui.triggersOn.disabled = busy;
   ui.triggersStop.disabled = busy;
@@ -383,6 +457,7 @@ function startNew() {
 }
 
 function cancel() {
+  if (!discardOk()) return;
   if (selected) {
     open(selected);
   } else {
@@ -407,9 +482,10 @@ function validate() {
       ui.check.className = "check ok";
       showPublicKey(publicKey);
     } catch (e) {
-      ui.check.textContent = String(e);
+      ui.check.textContent = readable(e);
       ui.check.className = "check bad";
-      showPublicKey(null);
+      // A config still being written has no Address or [Peer] yet, but its key can be handed out.
+      showPublicKey(generated && text.includes(generated.line) ? generated.publicKey : null);
     }
   }, 250);
   setButtons();
@@ -434,15 +510,26 @@ function openLinksOutside(e) {
 document.addEventListener("click", openLinksOutside);
 document.addEventListener("auxclick", openLinksOutside);
 
-// No browser menu (print, save page, reload…); text fields keep theirs for copy and paste.
+// No browser menu (print, save page, reload…); text fields and selected text keep theirs, for
+// copy and paste.
 document.addEventListener("contextmenu", (e) => {
-  if (!e.target.closest("input, textarea")) e.preventDefault();
+  if (!e.target.closest("input, textarea") && document.getSelection().isCollapsed) e.preventDefault();
 });
 
 // No browser shortcuts: print, save page, find, reload, zoom-out-of-layout.
 document.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
   const ctrl = e.ctrlKey || e.metaKey;
+  // In the editor, Ctrl+S saves and Escape cancels, as in other Windows editors.
+  if (!ui.editor.hidden && ctrl && key === "s") {
+    e.preventDefault();
+    if (!ui.save.disabled) ui.save.click();
+    return;
+  }
+  if (!ui.editor.hidden && key === "escape") {
+    cancel();
+    return;
+  }
   if (key === "f5" || (ctrl && ["p", "s", "f", "r", "g", "j", "u"].includes(key))) {
     e.preventDefault();
   }
@@ -450,31 +537,50 @@ document.addEventListener("keydown", (e) => {
 
 // ---- Wiring ----
 
-ui.add.onclick = startNew;
+// Not while a save is in flight: its loadDetails would replace the new editor a moment later.
+ui.add.onclick = () => { if (!busy && discardOk()) startNew(); };
 ui.edit.onclick = edit;
 ui.cancel.onclick = cancel;
 ui.config.oninput = validate;
 ui.name.oninput = setButtons;
 
+// Notepad's "Unicode" is UTF-16 with a byte order mark; `tunnelik add` reads it too.
+async function readText(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le"
+    : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+  return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+}
+
+$("import-button").onclick = () => ui.importFile.click();
 ui.importFile.onchange = async () => {
   const file = ui.importFile.files[0];
   ui.importFile.value = "";
   if (!file) return;
-  ui.config.value = await file.text();
+  try {
+    ui.config.value = await readText(file);
+  } catch {
+    return showError(`"${file.name}" is not UTF-8 text; save it as UTF-8 and import it again.`);
+  }
   if (selected === null && !ui.name.value.trim()) {
-    ui.name.value = file.name.replace(/\.conf$/i, "");
+    // Only characters a tunnel name may have: "wg0 (1).conf" becomes "wg0 1".
+    ui.name.value = file.name.replace(/\.conf$/i, "").replace(/[^A-Za-z0-9 ._-]/g, "")
+      .replace(/^[\s.]+/, "").trim().slice(0, 64);
   }
   validate();
 };
 
 // A new private key goes straight into the config box; the public key shows under it.
 ui.generate.onclick = () => run(async () => {
-  if (ui.config.value.includes("PrivateKey") &&
+  // Keys are case-insensitive in the parser, so `privatekey =` is a key to protect too.
+  if (/^\s*privatekey\s*=/im.test(ui.config.value) &&
       !confirm("Replace the private key in this config? Peers will need the new public key.")) {
     return;
   }
-  const generated = await invoke("generate_key", { config: ui.config.value });
-  ui.config.value = generated.config;
+  const result = await invoke("generate_key", { config: ui.config.value });
+  ui.config.value = result.config;
+  const line = result.config.match(/^\s*PrivateKey\s*=.*$/im)?.[0].trim();
+  generated = line ? { line, publicKey: result.publicKey } : null;
   validate();
 });
 
@@ -483,13 +589,16 @@ invoke("app_version").then((v) => { ui.version.textContent = v ? `v${v}` : ""; }
 
 ui.save.onclick = () => run(async () => {
   const name = ui.name.value.trim();
+  const wasUp = stateOf(tunnels.find((t) => t.name === name)) !== "disconnected";
   await invoke("save_tunnel", { name, config: ui.config.value });
   await refresh();
   await loadDetails(name);
+  if (wasUp) ui.notice.textContent = `Saved. "${name}" uses the new settings once you reconnect it.`;
 });
 
 ui.del.onclick = () => {
-  if (!confirm(`Delete tunnel "${selected}"? Its config will be removed from this PC.`)) return;
+  const up = stateOf(current()) !== "disconnected";
+  if (!confirm(`Delete "${selected}"${up ? " and disconnect it" : ""}? Its config and private key are removed from this PC; this can't be undone.`)) return;
   run(async () => {
     await invoke("remove_tunnel", { name: selected });
     selected = null;
@@ -531,11 +640,16 @@ ui.addApp.onclick = () => run(async () => {
 // The feature itself is a switch: starting or stopping the helper service, with Windows'
 // administrator prompt in between.
 ui.triggersOn.onclick = () => run(async () => {
-  await invoke("enable_triggers", { enabled: true });
+  ui.triggersOn.textContent = "Waiting for approval…";
+  try {
+    await invoke("enable_triggers", { enabled: true });
+  } finally {
+    ui.triggersOn.textContent = "Turn on…";
+  }
   await loadDetails(selected);
 });
 ui.triggersStop.onclick = () => run(async () => {
-  if (!confirm("Turn off \"Start on its own\"? Tunnels keep their lists, but none starts on its own until it is turned on again.")) return;
+  if (!confirm("Stop the helper service? Windows keeps starting tunnels for the programs and domains they already have.")) return;
   await invoke("enable_triggers", { enabled: false });
   await loadDetails(selected);
 });
@@ -559,5 +673,10 @@ invoke("repair_profiles")
   .catch((e) => showError(String(e)));
 
 // Keep the status current, including changes made from Settings or the command line.
-refresh();
+refresh().then(() => {
+  // Open on a tunnel rather than an empty page: the connected one, else the first.
+  if (selected === null && ui.editor.hidden && tunnels.length) {
+    open((tunnels.find((t) => t.state !== "disconnected") ?? tunnels[0]).name);
+  }
+});
 setInterval(() => { if (!busy) refresh(); }, 3000);

@@ -19,8 +19,8 @@
 
   <main id="main">
     <section id="empty" class="empty">
-      <h2>No tunnel selected</h2>
-      <p>Add a tunnel by pasting a WireGuard config, or importing a <code>.conf</code> file.
+      <h2 id="empty-title">No tunnel selected</h2>
+      <p>Add a tunnel by pasting a WireGuard or AmneziaWG config, or importing a <code>.conf</code> file.
          Then connect it here, from Settings &rsaquo; Network &amp; internet &rsaquo; VPN,
          or with <code>tunnelik up &lt;name&gt;</code>.</p>
     </section>
@@ -31,16 +31,16 @@
         <h2 class="card-title">Interface: <span id="d-name"></span></h2>
         <dl id="d-interface" class="fields"></dl>
         <label class="option">
-          <input id="keep-awake" type="checkbox">
+          <input id="keep-awake" type="checkbox" aria-describedby="keep-awake-hint">
           <span>Keep this PC awake while the tunnel is busy</span>
         </label>
-        <p class="hint">Holds off idle sleep while more than about 64 KiB a minute goes through.
+        <p id="keep-awake-hint" class="hint">Holds off idle sleep while more than about 64 KiB a minute goes through.
           The lid and the power button still work.</p>
         <label class="option">
-          <input id="always-on" type="checkbox">
+          <input id="always-on" type="checkbox" aria-describedby="always-on-hint">
           <span>Always on: connect at sign-in, and again after Windows drops it</span>
         </label>
-        <p class="hint">Reconnects after standby or a network change. Turning it off here, in
+        <p id="always-on-hint" class="hint">Reconnects after standby or a network change. Turning it off here, in
           Settings or in the flyout keeps it off until the next sign-in or network change.</p>
         <div class="card-actions">
           <button id="toggle" class="button primary"></button>
@@ -53,7 +53,7 @@
         <div class="card-head">
           <h2 class="card-title">Start on its own</h2>
           <span class="spacer"></span>
-          <button id="triggers-stop" class="linkish" title="Stops the helper service; tunnels keep their lists but no longer start for a program or a domain" hidden>Turn off Windows triggers</button>
+          <button id="triggers-stop" class="linkish" title="Stops Tunnelik's helper service; Windows keeps starting tunnels for programs and domains already added" hidden>Stop helper service</button>
         </div>
         <p id="triggers-elsewhere" class="hint hint-lead" hidden></p>
         <!-- Off by default: it starts a system service, so it asks before touching the system. -->
@@ -76,7 +76,7 @@
             looked up, or a program first tries to reach one of these ranges.</p>
           <ul id="d-destinations" class="triggers" aria-label="Domains and subnets"></ul>
           <div class="trigger-add">
-            <input id="destination" class="field" placeholder="corp.example or 10.0.0.0/8" spellcheck="false" autocomplete="off">
+            <input id="destination" class="field" placeholder="corp.example or 10.0.0.0/8" aria-label="Domain or address range" spellcheck="false" autocomplete="off">
             <button id="add-destination" class="button">Add</button>
           </div>
         </section>
@@ -108,17 +108,18 @@
     <!-- Full config, private key included: only shown when adding or editing a tunnel. -->
     <section id="editor" class="editor" hidden>
       <div class="editor-head">
-        <input id="name" class="name" placeholder="Tunnel name" spellcheck="false" autocomplete="off">
+        <input id="name" class="name" placeholder="Tunnel name" aria-label="Tunnel name" aria-describedby="name-note" spellcheck="false" autocomplete="off">
       </div>
       <p id="name-note" class="check bad" role="alert" hidden></p>
-      <textarea id="config" class="config" spellcheck="false"
+      <textarea id="config" class="config" spellcheck="false" aria-label="Config" aria-describedby="check pubkey"
         placeholder="[Interface]&#10;PrivateKey = …&#10;Address = 10.0.0.2/32&#10;&#10;[Peer]&#10;PublicKey = …&#10;AllowedIPs = 10.0.0.0/8&#10;Endpoint = vpn.example.com:51820"></textarea>
       <p id="check" class="check" role="status"></p>
       <p class="hint hint-lead">A WireGuard config, or an AmneziaWG one: those are told apart by
         their Jc, S, H and I settings.</p>
       <p id="pubkey" class="pubkey" hidden>Public key: <code id="pubkey-value"></code></p>
       <div class="editor-foot">
-        <label class="button">Import .conf<input id="import" type="file" accept=".conf,text/plain" hidden></label>
+        <button id="import-button" class="button">Import .conf…</button>
+        <input id="import" type="file" accept=".conf,text/plain" hidden>
         <button id="generate" class="button" title="Puts a new private key into the config; give the public key to the server side">Generate key</button>
         <span class="spacer"></span>
         <button id="cancel" class="button">Cancel</button>
@@ -127,6 +128,7 @@
     </section>
 
     <p id="error" class="error" role="alert" hidden></p>
+    <p id="notice" class="notice" role="status"></p>
 
     <footer class="legal">
       “WireGuard” is a registered trademark of Jason A. Donenfeld. Tunnelik is not affiliated with
