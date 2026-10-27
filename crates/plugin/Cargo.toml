@@ -26,7 +26,7 @@ mock_instant = "0.6"
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
 windows-collections = "0.3"
-windows-future = "0.3"
+windows-future = "0.100"
 windows = { version = "0.62", features = [
     "ApplicationModel",
     "ApplicationModel_Background",
