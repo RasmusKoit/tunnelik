@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The windows-* crates move together with windows itself, by hand.
+      # On 0.x a minor bump is a breaking one, so skip both.
+      - dependency-name: "windows-*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: /
